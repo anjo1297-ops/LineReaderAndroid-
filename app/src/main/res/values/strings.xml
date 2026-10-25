@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Line Reader</string>
+    <string name="open_document">Open document</string>
+    <string name="previous_line">Previous line</string>
+    <string name="next_line">Next line</string>
+    <string name="reader_hint">Open a PDF, EPUB, DOCX, TXT or HTML file.</string>
+</resources>
