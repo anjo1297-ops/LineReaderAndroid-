@@ -54,6 +54,7 @@ public class LineReaderView extends View {
             announceCurrentLine();
         } else {
             announceForAccessibility("End of document");
+            reclaimAccessibilityFocus();
         }
     }
 
@@ -64,6 +65,7 @@ public class LineReaderView extends View {
             announceCurrentLine();
         } else {
             announceForAccessibility("Beginning of document");
+            reclaimAccessibilityFocus();
         }
     }
 
@@ -71,14 +73,21 @@ public class LineReaderView extends View {
         return lines.isEmpty() ? "" : lines.get(Math.max(0, Math.min(lineIndex, lines.size() - 1)));
     }
 
-    /**
-     * Announce only the changed line. Do not replace the View content description and do not
-     * emit TYPE_VIEW_TEXT_CHANGED here: both can cause TalkBack to treat the reader as a newly
-     * changed accessibility node and move accessibility focus to the neighbouring buttons.
-     */
     private void announceCurrentLine() {
         invalidate();
         announceForAccessibility(currentLine());
+        reclaimAccessibilityFocus();
+    }
+
+    /**
+     * TalkBack can advance accessibility focus after handling a scroll action. Re-assert focus
+     * on the reading surface after the action settles so subsequent gestures continue reading
+     * the document instead of landing on neighbouring controls.
+     */
+    private void reclaimAccessibilityFocus() {
+        requestFocus();
+        post(() -> performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null));
+        postDelayed(() -> performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null), 120);
     }
 
     private void rebuildLines() {
