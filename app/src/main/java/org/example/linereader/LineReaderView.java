@@ -379,23 +379,23 @@ public class LineReaderView extends View {
             }
 
             if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                    || action == AccessibilityNodeInfo.ACTION_SCROLL_RIGHT) {
+                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId()) {
                 nextPage();
                 return true;
             }
 
             if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                    || action == AccessibilityNodeInfo.ACTION_SCROLL_LEFT) {
+                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId()) {
                 previousPage();
                 return true;
             }
 
-            if (action == AccessibilityNodeInfo.ACTION_SCROLL_DOWN) {
+            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId()) {
                 nextParagraph();
                 return true;
             }
 
-            if (action == AccessibilityNodeInfo.ACTION_SCROLL_UP) {
+            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId()) {
                 previousParagraph();
                 return true;
             }
