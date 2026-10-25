@@ -16,30 +16,5 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
         android:contentDescription="Document reading area" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:importantForAccessibility="noHideDescendants">
-
-        <Button
-            android:id="@+id/previousButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:focusable="false"
-            android:text="@string/previous_line" />
-
-        <Button
-            android:id="@+id/nextButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:focusable="false"
-            android:text="@string/next_line" />
-    </LinearLayout>
 </LinearLayout>
