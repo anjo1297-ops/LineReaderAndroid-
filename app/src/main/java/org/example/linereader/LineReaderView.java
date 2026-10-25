@@ -20,17 +20,25 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Accessibility-first reading surface.
+ * FlexiReader accessibility-first reading surface.
  *
- * Each visual text line is exposed as a virtual accessibility child. TalkBack therefore
- * moves between lines as real accessibility nodes instead of repeatedly changing one node
- * and trying to force accessibility focus back to it.
+ * Normal TalkBack next/previous item navigation moves line by line through virtual nodes.
+ * Accessibility scroll actions are reserved for larger jumps so TalkBack two-finger scroll
+ * gestures can provide page and paragraph navigation without adding more on-screen buttons.
  */
 public class LineReaderView extends View {
     private static final int HOST_VIEW_ID = -1;
 
+    private static final int ACTION_NEXT_SENTENCE = 0x01020001;
+    private static final int ACTION_PREVIOUS_SENTENCE = 0x01020002;
+    private static final int ACTION_NEXT_HEADING = 0x01020003;
+    private static final int ACTION_PREVIOUS_HEADING = 0x01020004;
+
     private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<String> lines = new ArrayList<>();
+    private final List<Integer> paragraphStarts = new ArrayList<>();
+    private final List<Integer> sentenceStarts = new ArrayList<>();
+    private final List<Integer> headingStarts = new ArrayList<>();
     private final LineNodeProvider nodeProvider = new LineNodeProvider();
 
     private String documentText = "Open a document to begin.";
@@ -65,6 +73,66 @@ public class LineReaderView extends View {
         moveToLine(Math.max(lineIndex - 1, 0));
     }
 
+    private void nextPage() {
+        moveToLine(Math.min(lineIndex + linesPerPage(), lines.size() - 1));
+    }
+
+    private void previousPage() {
+        moveToLine(Math.max(lineIndex - linesPerPage(), 0));
+    }
+
+    private void nextParagraph() {
+        moveToBoundary(paragraphStarts, true);
+    }
+
+    private void previousParagraph() {
+        moveToBoundary(paragraphStarts, false);
+    }
+
+    private void nextSentence() {
+        moveToBoundary(sentenceStarts, true);
+    }
+
+    private void previousSentence() {
+        moveToBoundary(sentenceStarts, false);
+    }
+
+    private void nextHeading() {
+        moveToBoundary(headingStarts, true);
+    }
+
+    private void previousHeading() {
+        moveToBoundary(headingStarts, false);
+    }
+
+    private void moveToBoundary(List<Integer> boundaries, boolean forward) {
+        if (boundaries.isEmpty()) return;
+        if (forward) {
+            for (int value : boundaries) {
+                if (value > lineIndex) {
+                    moveToLine(value);
+                    return;
+                }
+            }
+            moveToLine(lines.size() - 1);
+        } else {
+            for (int i = boundaries.size() - 1; i >= 0; i--) {
+                int value = boundaries.get(i);
+                if (value < lineIndex) {
+                    moveToLine(value);
+                    return;
+                }
+            }
+            moveToLine(0);
+        }
+    }
+
+    private int linesPerPage() {
+        float lineHeight = Math.max(1f, textPaint.getFontMetrics().bottom - textPaint.getFontMetrics().top);
+        int usableHeight = Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
+        return Math.max(5, (int) (usableHeight / lineHeight));
+    }
+
     private void moveToLine(int newIndex) {
         if (lines.isEmpty()) return;
         newIndex = Math.max(0, Math.min(newIndex, lines.size() - 1));
@@ -93,12 +161,24 @@ public class LineReaderView extends View {
 
     private void rebuildLines() {
         lines.clear();
+        paragraphStarts.clear();
+        sentenceStarts.clear();
+        headingStarts.clear();
+
         int width = Math.max(320, getWidth() - getPaddingLeft() - getPaddingRight());
         String normalized = documentText.replace("\r\n", "\n").replace('\r', '\n');
 
         for (String paragraph : normalized.split("\n", -1)) {
             String p = paragraph.trim();
             if (p.isEmpty()) continue;
+
+            int paragraphStart = lines.size();
+            paragraphStarts.add(paragraphStart);
+            sentenceStarts.add(paragraphStart);
+
+            if (looksLikeHeading(p)) {
+                headingStarts.add(paragraphStart);
+            }
 
             StaticLayout layout = StaticLayout.Builder.obtain(p, 0, p.length(), textPaint, width)
                     .setAlignment(Layout.Alignment.ALIGN_NORMAL)
@@ -109,13 +189,38 @@ public class LineReaderView extends View {
                 int start = layout.getLineStart(i);
                 int end = layout.getLineEnd(i);
                 String line = p.substring(start, end).trim();
-                if (!line.isEmpty()) lines.add(line);
+                if (!line.isEmpty()) {
+                    lines.add(line);
+                    if (endsSentence(line) && i + 1 < layout.getLineCount()) {
+                        sentenceStarts.add(lines.size());
+                    }
+                }
             }
         }
 
-        if (lines.isEmpty()) lines.add("No readable text was found.");
+        if (lines.isEmpty()) {
+            lines.add("No readable text was found.");
+            paragraphStarts.add(0);
+            sentenceStarts.add(0);
+        }
+
         if (lineIndex >= lines.size()) lineIndex = lines.size() - 1;
         rebuildCurrentLayout();
+    }
+
+    private boolean endsSentence(String line) {
+        String value = line.trim();
+        if (value.isEmpty()) return false;
+        char last = value.charAt(value.length() - 1);
+        return last == '.' || last == '?' || last == '!';
+    }
+
+    private boolean looksLikeHeading(String paragraph) {
+        String p = paragraph.trim();
+        if (p.length() > 90) return false;
+        if (p.endsWith(".") || p.endsWith("?") || p.endsWith("!")) return false;
+        String[] words = p.split("\\s+");
+        return words.length <= 12;
     }
 
     private void rebuildCurrentLayout() {
@@ -153,7 +258,7 @@ public class LineReaderView extends View {
         super.onInitializeAccessibilityNodeInfo(info);
         info.setClassName("android.view.ViewGroup");
         info.setPackageName(getContext().getPackageName());
-        info.setContentDescription("Document reading area. " + lines.size() + " lines.");
+        info.setContentDescription("FlexiReader document. " + lines.size() + " lines.");
         info.setFocusable(false);
         info.setScreenReaderFocusable(false);
         for (int i = 0; i < lines.size(); i++) {
@@ -203,9 +308,24 @@ public class LineReaderView extends View {
 
         if (virtualId < lines.size() - 1) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN);
         }
         if (virtualId > 0) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP);
+        }
+
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                ACTION_NEXT_SENTENCE, "Next sentence"));
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                ACTION_PREVIOUS_SENTENCE, "Previous sentence"));
+        if (!headingStarts.isEmpty()) {
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_NEXT_HEADING, "Next heading"));
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_PREVIOUS_HEADING, "Previous heading"));
         }
 
         return info;
@@ -258,17 +378,45 @@ public class LineReaderView extends View {
                 return true;
             }
 
-            if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) {
-                if (virtualViewId < lines.size() - 1) {
-                    focusVirtualLine(virtualViewId + 1);
-                }
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    || action == AccessibilityNodeInfo.ACTION_SCROLL_RIGHT) {
+                nextPage();
                 return true;
             }
 
-            if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) {
-                if (virtualViewId > 0) {
-                    focusVirtualLine(virtualViewId - 1);
-                }
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    || action == AccessibilityNodeInfo.ACTION_SCROLL_LEFT) {
+                previousPage();
+                return true;
+            }
+
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_DOWN) {
+                nextParagraph();
+                return true;
+            }
+
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_UP) {
+                previousParagraph();
+                return true;
+            }
+
+            if (action == ACTION_NEXT_SENTENCE) {
+                nextSentence();
+                return true;
+            }
+
+            if (action == ACTION_PREVIOUS_SENTENCE) {
+                previousSentence();
+                return true;
+            }
+
+            if (action == ACTION_NEXT_HEADING) {
+                nextHeading();
+                return true;
+            }
+
+            if (action == ACTION_PREVIOUS_HEADING) {
+                previousHeading();
                 return true;
             }
 
