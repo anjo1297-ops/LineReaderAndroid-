@@ -30,8 +30,6 @@ public class MainActivity extends AppCompatActivity {
 
         readerView = findViewById(R.id.readerView);
         Button open = findViewById(R.id.openButton);
-        Button previous = findViewById(R.id.previousButton);
-        Button next = findViewById(R.id.nextButton);
 
         open.setOnClickListener(v -> openDocument.launch(new String[]{
                 "application/pdf",
@@ -41,8 +39,6 @@ public class MainActivity extends AppCompatActivity {
                 "text/html",
                 "application/octet-stream"
         }));
-        previous.setOnClickListener(v -> readerView.previousLine());
-        next.setOnClickListener(v -> readerView.nextLine());
 
         Intent intent = getIntent();
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
