@@ -4,13 +4,13 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.util.AttributeSet;
 import android.view.View;
-import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.util.ArrayList;
@@ -33,6 +33,10 @@ public class LineReaderView extends View {
         textPaint.setTypeface(Typeface.DEFAULT);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         setFocusable(true);
+        setFocusableInTouchMode(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            setScreenReaderFocusable(true);
+        }
         rebuildLines();
     }
 
@@ -67,10 +71,13 @@ public class LineReaderView extends View {
         return lines.isEmpty() ? "" : lines.get(Math.max(0, Math.min(lineIndex, lines.size() - 1)));
     }
 
+    /**
+     * Announce only the changed line. Do not replace the View content description and do not
+     * emit TYPE_VIEW_TEXT_CHANGED here: both can cause TalkBack to treat the reader as a newly
+     * changed accessibility node and move accessibility focus to the neighbouring buttons.
+     */
     private void announceCurrentLine() {
         invalidate();
-        setContentDescription(currentLine());
-        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED);
         announceForAccessibility(currentLine());
     }
 
@@ -129,8 +136,12 @@ public class LineReaderView extends View {
         info.setScrollable(lines.size() > 1);
         info.setText(currentLine());
         info.setContentDescription("Line " + (lineIndex + 1) + " of " + lines.size() + ". " + currentLine());
-        if (lineIndex < lines.size() - 1) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
-        if (lineIndex > 0) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        if (lineIndex < lines.size() - 1) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+        }
+        if (lineIndex > 0) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        }
     }
 
     @Override
