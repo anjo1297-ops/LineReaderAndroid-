@@ -10,6 +10,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
@@ -24,6 +25,7 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar loadingProgress;
     private Button openButton;
     private int lastAnnouncedPercent = -20;
+    private boolean documentOpen = false;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private final ActivityResultLauncher<String[]> openDocument = registerForActivityResult(
@@ -52,6 +54,22 @@ public class MainActivity extends AppCompatActivity {
                 "application/octet-stream"
         }));
 
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (documentOpen) {
+                    returnToHome();
+                    return;
+                }
+
+                // At the FlexiReader home screen, Back keeps the normal Android behaviour
+                // and leaves the app.
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+                setEnabled(true);
+            }
+        });
+
         Intent intent = getIntent();
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
             loadDocument(intent.getData());
@@ -68,20 +86,39 @@ public class MainActivity extends AppCompatActivity {
 
                 runOnUiThread(() -> {
                     readerView.setDocumentText(text);
+                    documentOpen = true;
                     hideLoading();
                     readerView.announceForAccessibility("Document loaded");
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
+                    documentOpen = false;
                     hideLoading();
                     String detail = e.getMessage();
-                    if (detail == null || detail.trim().isEmpty()) detail = e.getClass().getSimpleName();
+                    if (detail == null || detail.trim().isEmpty()) {
+                        detail = e.getClass().getSimpleName();
+                    }
                     Toast.makeText(this,
                             "Could not read this document: " + detail,
                             Toast.LENGTH_LONG).show();
                     readerView.announceForAccessibility("Could not read this document");
                 });
             }
+        });
+    }
+
+    private void returnToHome() {
+        documentOpen = false;
+        readerView.setDocumentText("Open a document to begin.");
+        hideLoading();
+
+        // Put TalkBack back on the main action rather than leaving accessibility focus on
+        // a virtual document line that no longer exists.
+        openButton.post(() -> {
+            openButton.requestFocus();
+            openButton.sendAccessibilityEvent(
+                    android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED);
+            openButton.announceForAccessibility("FlexiReader home. Open document.");
         });
     }
 
