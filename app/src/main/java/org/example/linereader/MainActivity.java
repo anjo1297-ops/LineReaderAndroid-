@@ -3,7 +3,11 @@ package org.example.linereader;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.view.View;
 import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -15,6 +19,11 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
     private LineReaderView readerView;
+    private LinearLayout loadingContainer;
+    private TextView loadingStatus;
+    private ProgressBar loadingProgress;
+    private Button openButton;
+    private int lastAnnouncedPercent = -20;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private final ActivityResultLauncher<String[]> openDocument = registerForActivityResult(
@@ -29,9 +38,12 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         readerView = findViewById(R.id.readerView);
-        Button open = findViewById(R.id.openButton);
+        loadingContainer = findViewById(R.id.loadingContainer);
+        loadingStatus = findViewById(R.id.loadingStatus);
+        loadingProgress = findViewById(R.id.loadingProgress);
+        openButton = findViewById(R.id.openButton);
 
-        open.setOnClickListener(v -> openDocument.launch(new String[]{
+        openButton.setOnClickListener(v -> openDocument.launch(new String[]{
                 "application/pdf",
                 "application/epub+zip",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -47,18 +59,59 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadDocument(Uri uri) {
-        readerView.announceForAccessibility("Loading document");
+        showLoading("Loading document", 0, 0, true);
         executor.submit(() -> {
             try {
-                String text = DocumentParser.parse(this, uri);
-                runOnUiThread(() -> readerView.setDocumentText(text));
+                String text = DocumentParser.parse(this, uri,
+                        (message, current, total) -> runOnUiThread(() ->
+                                showLoading(message, current, total, false)));
+
+                runOnUiThread(() -> {
+                    readerView.setDocumentText(text);
+                    hideLoading();
+                    readerView.announceForAccessibility("Document loaded");
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    Toast.makeText(this, "Could not read this document: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    hideLoading();
+                    String detail = e.getMessage();
+                    if (detail == null || detail.trim().isEmpty()) detail = e.getClass().getSimpleName();
+                    Toast.makeText(this,
+                            "Could not read this document: " + detail,
+                            Toast.LENGTH_LONG).show();
                     readerView.announceForAccessibility("Could not read this document");
                 });
             }
         });
+    }
+
+    private void showLoading(String message, int current, int total, boolean forceAnnouncement) {
+        loadingContainer.setVisibility(View.VISIBLE);
+        openButton.setEnabled(false);
+        loadingStatus.setText(message);
+        loadingProgress.setContentDescription(message);
+
+        if (total > 0) {
+            loadingProgress.setIndeterminate(false);
+            int percent = Math.max(0, Math.min(100,
+                    Math.round((current * 100f) / total)));
+            loadingProgress.setProgress(percent);
+
+            if (forceAnnouncement || percent >= lastAnnouncedPercent + 20
+                    || message.toLowerCase().startsWith("scanning")) {
+                loadingStatus.announceForAccessibility(message);
+                lastAnnouncedPercent = percent;
+            }
+        } else {
+            loadingProgress.setIndeterminate(true);
+            if (forceAnnouncement) loadingStatus.announceForAccessibility(message);
+        }
+    }
+
+    private void hideLoading() {
+        loadingContainer.setVisibility(View.GONE);
+        openButton.setEnabled(true);
+        lastAnnouncedPercent = -20;
     }
 
     @Override
