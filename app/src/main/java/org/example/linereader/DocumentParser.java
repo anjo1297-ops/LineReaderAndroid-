@@ -35,21 +35,32 @@ public final class DocumentParser {
     private static final int MIN_EXTRACTED_CHARACTERS_PER_PAGE = 24;
     private static final float OCR_RENDER_SCALE = 1.5f;
 
+    public interface ProgressListener {
+        void onProgress(String message, int current, int total);
+    }
+
     private DocumentParser() {}
 
     public static String parse(Context context, Uri uri) throws Exception {
+        return parse(context, uri, null);
+    }
+
+    public static String parse(Context context, Uri uri, ProgressListener listener) throws Exception {
         String name = getFileName(context, uri).toLowerCase();
         String mime = context.getContentResolver().getType(uri);
 
         if (name.endsWith(".pdf") || "application/pdf".equals(mime)) {
-            return parsePdf(context, uri);
+            return parsePdf(context, uri, listener);
         }
 
+        notifyProgress(listener, "Reading document", 0, 0);
         byte[] data = readAll(context.getContentResolver(), uri);
         if (name.endsWith(".docx") || (mime != null && mime.contains("wordprocessingml"))) {
+            notifyProgress(listener, "Processing Word document", 0, 0);
             return parseDocx(data);
         }
         if (name.endsWith(".epub") || "application/epub+zip".equals(mime)) {
+            notifyProgress(listener, "Processing EPUB", 0, 0);
             return parseEpub(data);
         }
         if (name.endsWith(".html") || name.endsWith(".htm") || "text/html".equals(mime)) {
@@ -58,44 +69,65 @@ public final class DocumentParser {
         return new String(data, StandardCharsets.UTF_8);
     }
 
-    /**
-     * Reads PDFs page by page. Native PDF text is preferred. If a page contains little or no
-     * extractable text, that page alone is rendered and passed to ML Kit OCR. The bitmap is then
-     * recycled before moving to the next page, keeping memory bounded for large scanned books.
-     */
-    private static String parsePdf(Context context, Uri uri) throws Exception {
+    private static String parsePdf(Context context, Uri uri, ProgressListener listener) throws Exception {
         PDFBoxResourceLoader.init(context.getApplicationContext());
+        notifyProgress(listener, "Opening PDF", 0, 0);
+
         try (InputStream in = context.getContentResolver().openInputStream(uri)) {
             if (in == null) throw new IllegalArgumentException("Cannot open the selected PDF.");
 
             try (PDDocument doc = PDDocument.load(in)) {
-                PDFRenderer renderer = new PDFRenderer(doc);
-                TextRecognizer recognizer = TextRecognition.getClient(
-                        TextRecognizerOptions.DEFAULT_OPTIONS);
+                int totalPages = doc.getNumberOfPages();
+                PDFRenderer renderer = null;
+                TextRecognizer recognizer = null;
                 StringBuilder out = new StringBuilder();
 
                 try {
-                    for (int pageIndex = 0; pageIndex < doc.getNumberOfPages(); pageIndex++) {
-                        String pageText = extractPdfPage(doc, pageIndex);
+                    for (int pageIndex = 0; pageIndex < totalPages; pageIndex++) {
+                        int pageNumber = pageIndex + 1;
+                        notifyProgress(listener,
+                                "Reading page " + pageNumber + " of " + totalPages,
+                                pageNumber, totalPages);
+
+                        String pageText = "";
+                        try {
+                            pageText = extractPdfPage(doc, pageIndex);
+                        } catch (Exception ignored) {
+                            // If native extraction fails on one page, OCR that page instead of
+                            // aborting the entire document.
+                        }
+
                         if (hasUsefulText(pageText)) {
                             appendPage(out, normalizePdfPageText(pageText));
                             continue;
                         }
 
+                        notifyProgress(listener,
+                                "Scanning page " + pageNumber + " of " + totalPages,
+                                pageNumber, totalPages);
+
                         Bitmap bitmap = null;
                         try {
+                            if (renderer == null) renderer = new PDFRenderer(doc);
+                            if (recognizer == null) {
+                                recognizer = TextRecognition.getClient(
+                                        TextRecognizerOptions.DEFAULT_OPTIONS);
+                            }
+
                             bitmap = renderer.renderImage(pageIndex, OCR_RENDER_SCALE);
                             InputImage image = InputImage.fromBitmap(bitmap, 0);
                             Text result = Tasks.await(recognizer.process(image));
-                            appendPage(out, ocrResultToText(result));
+                            String ocrText = ocrResultToText(result);
+                            if (!ocrText.isEmpty()) appendPage(out, ocrText);
+                        } catch (Exception ocrError) {
+                            // OCR failure on one page must not prevent already-readable pages from
+                            // opening. Continue through the document and preserve any text found.
                         } finally {
-                            if (bitmap != null && !bitmap.isRecycled()) {
-                                bitmap.recycle();
-                            }
+                            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
                         }
                     }
                 } finally {
-                    recognizer.close();
+                    if (recognizer != null) recognizer.close();
                 }
 
                 String result = out.toString().trim();
@@ -115,19 +147,23 @@ public final class DocumentParser {
     }
 
     private static boolean hasUsefulText(String text) {
-        if (text == null) return false;
-        return text.replaceAll("\\s+", "").length() >= MIN_EXTRACTED_CHARACTERS_PER_PAGE;
+        return text != null
+                && text.replaceAll("\\s+", "").length() >= MIN_EXTRACTED_CHARACTERS_PER_PAGE;
+    }
+
+    private static void notifyProgress(ProgressListener listener,
+                                       String message, int current, int total) {
+        if (listener != null) listener.onProgress(message, current, total);
     }
 
     private static String normalizePdfPageText(String text) {
         if (text == null) return "";
-        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
-        // Preserve explicit blank lines as paragraph separators. Single line breaks remain line
-        // breaks, allowing the reader to keep visual-line navigation distinct from paragraphs.
-        normalized = normalized.replaceAll("[ \\t]+", " ")
+        return text.replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .trim()
+                .replaceAll("[ \\t]+", " ")
                 .replaceAll(" *\\n *", "\n")
                 .replaceAll("\\n{3,}", "\n\n");
-        return normalized;
     }
 
     private static String ocrResultToText(Text result) {
@@ -194,8 +230,7 @@ public final class DocumentParser {
                 String k = e.getKey().toLowerCase();
                 if (k.endsWith(".xhtml") || k.endsWith(".html") || k.endsWith(".htm")) {
                     if (fallback.length() > 0) fallback.append("\n\n");
-                    fallback.append(htmlToText(
-                            new String(e.getValue(), StandardCharsets.UTF_8)));
+                    fallback.append(htmlToText(new String(e.getValue(), StandardCharsets.UTF_8)));
                 }
             }
             return fallback.toString();
