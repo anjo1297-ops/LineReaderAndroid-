@@ -2,11 +2,19 @@ package org.example.linereader;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 
+import com.google.android.gms.tasks.Tasks;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
 import com.tom_roush.pdfbox.pdmodel.PDDocument;
+import com.tom_roush.pdfbox.rendering.PDFRenderer;
 import com.tom_roush.pdfbox.text.PDFTextStripper;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -24,14 +32,15 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public final class DocumentParser {
+    private static final int MIN_EXTRACTED_CHARACTERS_PER_PAGE = 24;
+    private static final float OCR_RENDER_SCALE = 1.5f;
+
     private DocumentParser() {}
 
     public static String parse(Context context, Uri uri) throws Exception {
         String name = getFileName(context, uri).toLowerCase();
         String mime = context.getContentResolver().getType(uri);
 
-        // PDFs are streamed directly into PDFBox instead of first duplicating the entire file
-        // into a byte array. This greatly reduces peak memory use on large PDFs.
         if (name.endsWith(".pdf") || "application/pdf".equals(mime)) {
             return parsePdf(context, uri);
         }
@@ -49,16 +58,96 @@ public final class DocumentParser {
         return new String(data, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Reads PDFs page by page. Native PDF text is preferred. If a page contains little or no
+     * extractable text, that page alone is rendered and passed to ML Kit OCR. The bitmap is then
+     * recycled before moving to the next page, keeping memory bounded for large scanned books.
+     */
     private static String parsePdf(Context context, Uri uri) throws Exception {
         PDFBoxResourceLoader.init(context.getApplicationContext());
         try (InputStream in = context.getContentResolver().openInputStream(uri)) {
             if (in == null) throw new IllegalArgumentException("Cannot open the selected PDF.");
+
             try (PDDocument doc = PDDocument.load(in)) {
-                PDFTextStripper stripper = new PDFTextStripper();
-                stripper.setSortByPosition(true);
-                return stripper.getText(doc);
+                PDFRenderer renderer = new PDFRenderer(doc);
+                TextRecognizer recognizer = TextRecognition.getClient(
+                        TextRecognizerOptions.DEFAULT_OPTIONS);
+                StringBuilder out = new StringBuilder();
+
+                try {
+                    for (int pageIndex = 0; pageIndex < doc.getNumberOfPages(); pageIndex++) {
+                        String pageText = extractPdfPage(doc, pageIndex);
+                        if (hasUsefulText(pageText)) {
+                            appendPage(out, normalizePdfPageText(pageText));
+                            continue;
+                        }
+
+                        Bitmap bitmap = null;
+                        try {
+                            bitmap = renderer.renderImage(pageIndex, OCR_RENDER_SCALE);
+                            InputImage image = InputImage.fromBitmap(bitmap, 0);
+                            Text result = Tasks.await(recognizer.process(image));
+                            appendPage(out, ocrResultToText(result));
+                        } finally {
+                            if (bitmap != null && !bitmap.isRecycled()) {
+                                bitmap.recycle();
+                            }
+                        }
+                    }
+                } finally {
+                    recognizer.close();
+                }
+
+                String result = out.toString().trim();
+                return result.isEmpty()
+                        ? "No readable text was found in this PDF."
+                        : result;
             }
         }
+    }
+
+    private static String extractPdfPage(PDDocument doc, int zeroBasedPage) throws Exception {
+        PDFTextStripper stripper = new PDFTextStripper();
+        stripper.setSortByPosition(true);
+        stripper.setStartPage(zeroBasedPage + 1);
+        stripper.setEndPage(zeroBasedPage + 1);
+        return stripper.getText(doc);
+    }
+
+    private static boolean hasUsefulText(String text) {
+        if (text == null) return false;
+        return text.replaceAll("\\s+", "").length() >= MIN_EXTRACTED_CHARACTERS_PER_PAGE;
+    }
+
+    private static String normalizePdfPageText(String text) {
+        if (text == null) return "";
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
+        // Preserve explicit blank lines as paragraph separators. Single line breaks remain line
+        // breaks, allowing the reader to keep visual-line navigation distinct from paragraphs.
+        normalized = normalized.replaceAll("[ \\t]+", " ")
+                .replaceAll(" *\\n *", "\n")
+                .replaceAll("\\n{3,}", "\n\n");
+        return normalized;
+    }
+
+    private static String ocrResultToText(Text result) {
+        StringBuilder out = new StringBuilder();
+        for (Text.TextBlock block : result.getTextBlocks()) {
+            if (out.length() > 0) out.append("\n\n");
+            List<Text.Line> lines = block.getLines();
+            for (int i = 0; i < lines.size(); i++) {
+                String value = lines.get(i).getText().trim();
+                if (!value.isEmpty()) out.append(value);
+                if (i < lines.size() - 1) out.append('\n');
+            }
+        }
+        return out.toString().trim();
+    }
+
+    private static void appendPage(StringBuilder out, String pageText) {
+        if (pageText == null || pageText.trim().isEmpty()) return;
+        if (out.length() > 0) out.append("\n\n");
+        out.append(pageText.trim());
     }
 
     private static String parseDocx(byte[] data) throws Exception {
@@ -79,7 +168,7 @@ public final class DocumentParser {
             if (event == XmlPullParser.START_TAG && "t".equals(parser.getName())) {
                 out.append(parser.nextText());
             } else if (event == XmlPullParser.END_TAG && "p".equals(parser.getName())) {
-                out.append('\n');
+                out.append("\n\n");
             } else if (event == XmlPullParser.START_TAG
                     && ("tab".equals(parser.getName()) || "br".equals(parser.getName()))) {
                 out.append(' ');
@@ -104,8 +193,9 @@ public final class DocumentParser {
             for (Map.Entry<String, byte[]> e : files.entrySet()) {
                 String k = e.getKey().toLowerCase();
                 if (k.endsWith(".xhtml") || k.endsWith(".html") || k.endsWith(".htm")) {
+                    if (fallback.length() > 0) fallback.append("\n\n");
                     fallback.append(htmlToText(
-                            new String(e.getValue(), StandardCharsets.UTF_8))).append("\n");
+                            new String(e.getValue(), StandardCharsets.UTF_8)));
                 }
             }
             return fallback.toString();
@@ -133,7 +223,8 @@ public final class DocumentParser {
             String path = normalizePath(base + href.split("#", 2)[0]);
             byte[] chapter = files.get(path);
             if (chapter != null) {
-                out.append(htmlToText(new String(chapter, StandardCharsets.UTF_8))).append("\n");
+                if (out.length() > 0) out.append("\n\n");
+                out.append(htmlToText(new String(chapter, StandardCharsets.UTF_8)));
             }
         }
         return out.toString();
@@ -155,7 +246,7 @@ public final class DocumentParser {
         return html
                 .replaceAll("(?is)<script.*?>.*?</script>", " ")
                 .replaceAll("(?is)<style.*?>.*?</style>", " ")
-                .replaceAll("(?i)</(p|div|h[1-6]|li|blockquote|tr)>", "\n")
+                .replaceAll("(?i)</(p|div|h[1-6]|li|blockquote|tr)>", "\n\n")
                 .replaceAll("(?i)<br\\s*/?>", "\n")
                 .replaceAll("(?s)<[^>]+>", " ")
                 .replace("&nbsp;", " ")
