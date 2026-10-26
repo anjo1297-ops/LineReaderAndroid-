@@ -22,9 +22,10 @@ import java.util.List;
 /**
  * FlexiReader accessibility-first reading surface.
  *
- * Normal TalkBack next/previous item navigation moves line by line through virtual nodes.
- * Accessibility scroll actions are reserved for larger jumps so TalkBack two-finger scroll
- * gestures can provide page and paragraph navigation without adding more on-screen buttons.
+ * Normal TalkBack next/previous-item navigation moves line by line through virtual nodes.
+ * Only a moving window of nearby lines is exposed to Android at any one time so very large
+ * documents do not overflow the accessibility transaction. Generic/vertical accessibility
+ * scrolling moves by paragraph; directional left/right scrolling moves by page.
  */
 public class LineReaderView extends View {
     private static final int HOST_VIEW_ID = -1;
@@ -33,6 +34,11 @@ public class LineReaderView extends View {
     private static final int ACTION_PREVIOUS_SENTENCE = 0x01020002;
     private static final int ACTION_NEXT_HEADING = 0x01020003;
     private static final int ACTION_PREVIOUS_HEADING = 0x01020004;
+    private static final int ACTION_NEXT_PARAGRAPH = 0x01020005;
+    private static final int ACTION_PREVIOUS_PARAGRAPH = 0x01020006;
+
+    private static final int ACCESSIBILITY_WINDOW_SIZE = 401;
+    private static final int ACCESSIBILITY_WINDOW_MARGIN = 40;
 
     private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<String> lines = new ArrayList<>();
@@ -44,6 +50,8 @@ public class LineReaderView extends View {
     private String documentText = "Open a document to begin.";
     private int lineIndex = 0;
     private int accessibilityFocusedLine = -1;
+    private int windowStart = 0;
+    private int windowEndExclusive = 0;
     private StaticLayout currentLayout;
 
     public LineReaderView(Context context, AttributeSet attrs) {
@@ -62,6 +70,7 @@ public class LineReaderView extends View {
         lineIndex = 0;
         accessibilityFocusedLine = -1;
         rebuildLines();
+        resetAccessibilityWindow(0);
         invalidate();
     }
 
@@ -128,8 +137,10 @@ public class LineReaderView extends View {
     }
 
     private int linesPerPage() {
-        float lineHeight = Math.max(1f, textPaint.getFontMetrics().bottom - textPaint.getFontMetrics().top);
-        int usableHeight = Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
+        float lineHeight = Math.max(1f,
+                textPaint.getFontMetrics().bottom - textPaint.getFontMetrics().top);
+        int usableHeight = Math.max(1,
+                getHeight() - getPaddingTop() - getPaddingBottom());
         return Math.max(5, (int) (usableHeight / lineHeight));
     }
 
@@ -145,18 +156,25 @@ public class LineReaderView extends View {
 
         int oldFocus = accessibilityFocusedLine;
         if (oldFocus >= 0 && oldFocus != newIndex) {
-            sendVirtualEvent(oldFocus, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
+            sendVirtualEvent(oldFocus,
+                    AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
         }
 
+        boolean windowChanged = ensureAccessibilityWindowContains(newIndex);
         accessibilityFocusedLine = newIndex;
         lineIndex = newIndex;
         rebuildCurrentLayout();
         invalidate();
+
+        if (windowChanged) {
+            sendHostContentChanged();
+        }
         sendVirtualEvent(newIndex, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
     }
 
     private String currentLine() {
-        return lines.isEmpty() ? "" : lines.get(Math.max(0, Math.min(lineIndex, lines.size() - 1)));
+        return lines.isEmpty() ? "" : lines.get(
+                Math.max(0, Math.min(lineIndex, lines.size() - 1)));
     }
 
     private void rebuildLines() {
@@ -205,6 +223,7 @@ public class LineReaderView extends View {
         }
 
         if (lineIndex >= lines.size()) lineIndex = lines.size() - 1;
+        resetAccessibilityWindow(lineIndex);
         rebuildCurrentLayout();
     }
 
@@ -231,6 +250,38 @@ public class LineReaderView extends View {
                 .setIncludePad(false)
                 .build();
         invalidate();
+    }
+
+    private void resetAccessibilityWindow(int anchor) {
+        if (lines.isEmpty()) {
+            windowStart = 0;
+            windowEndExclusive = 0;
+            return;
+        }
+        int half = ACCESSIBILITY_WINDOW_SIZE / 2;
+        int start = Math.max(0, anchor - half);
+        int end = Math.min(lines.size(), start + ACCESSIBILITY_WINDOW_SIZE);
+        start = Math.max(0, end - ACCESSIBILITY_WINDOW_SIZE);
+        windowStart = start;
+        windowEndExclusive = end;
+    }
+
+    private boolean ensureAccessibilityWindowContains(int line) {
+        if (windowEndExclusive <= windowStart) {
+            resetAccessibilityWindow(line);
+            return true;
+        }
+        boolean nearStart = line < windowStart + ACCESSIBILITY_WINDOW_MARGIN;
+        boolean nearEnd = line >= windowEndExclusive - ACCESSIBILITY_WINDOW_MARGIN;
+        if ((nearStart && windowStart > 0)
+                || (nearEnd && windowEndExclusive < lines.size())
+                || line < windowStart || line >= windowEndExclusive) {
+            int oldStart = windowStart;
+            int oldEnd = windowEndExclusive;
+            resetAccessibilityWindow(line);
+            return oldStart != windowStart || oldEnd != windowEndExclusive;
+        }
+        return false;
     }
 
     @Override
@@ -261,7 +312,7 @@ public class LineReaderView extends View {
         info.setContentDescription("FlexiReader document. " + lines.size() + " lines.");
         info.setFocusable(false);
         info.setScreenReaderFocusable(false);
-        for (int i = 0; i < lines.size(); i++) {
+        for (int i = windowStart; i < windowEndExclusive; i++) {
             info.addChild(this, i);
         }
     }
@@ -301,26 +352,31 @@ public class LineReaderView extends View {
         boolean focused = virtualId == accessibilityFocusedLine;
         info.setAccessibilityFocused(focused);
         if (focused) {
-            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
+            info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
         } else {
-            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
+            info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
         }
 
         if (virtualId < lines.size() - 1) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN);
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_NEXT_PARAGRAPH, "Next paragraph"));
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_NEXT_SENTENCE, "Next sentence"));
         }
         if (virtualId > 0) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP);
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_PREVIOUS_PARAGRAPH, "Previous paragraph"));
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    ACTION_PREVIOUS_SENTENCE, "Previous sentence"));
         }
-
-        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
-                ACTION_NEXT_SENTENCE, "Next sentence"));
-        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
-                ACTION_PREVIOUS_SENTENCE, "Previous sentence"));
         if (!headingStarts.isEmpty()) {
             info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
                     ACTION_NEXT_HEADING, "Next heading"));
@@ -342,6 +398,21 @@ public class LineReaderView extends View {
         event.getText().add(lines.get(virtualId));
         event.setContentDescription(lines.get(virtualId));
 
+        ViewParent parent = getParent();
+        if (parent != null) {
+            parent.requestSendAccessibilityEvent(this, event);
+        }
+    }
+
+    private void sendHostContentChanged() {
+        if (!isShown()) return;
+        AccessibilityEvent event = AccessibilityEvent.obtain(
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+        event.setPackageName(getContext().getPackageName());
+        event.setClassName("android.view.ViewGroup");
+        event.setSource(this);
+        event.setContentChangeTypes(
+                AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
         ViewParent parent = getParent();
         if (parent != null) {
             parent.requestSendAccessibilityEvent(this, event);
@@ -378,24 +449,36 @@ public class LineReaderView extends View {
                 return true;
             }
 
+            // TalkBack commonly sends generic forward/backward for two-finger vertical scroll.
             if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId()) {
-                nextPage();
-                return true;
-            }
-
-            if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId()) {
-                previousPage();
-                return true;
-            }
-
-            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId()) {
+                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId()) {
                 nextParagraph();
                 return true;
             }
 
-            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId()) {
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId()) {
+                previousParagraph();
+                return true;
+            }
+
+            // Directional horizontal scroll is reserved for page movement.
+            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId()) {
+                nextPage();
+                return true;
+            }
+
+            if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId()) {
+                previousPage();
+                return true;
+            }
+
+            if (action == ACTION_NEXT_PARAGRAPH) {
+                nextParagraph();
+                return true;
+            }
+
+            if (action == ACTION_PREVIOUS_PARAGRAPH) {
                 previousParagraph();
                 return true;
             }
