@@ -5,4 +5,7 @@
     <string name="next_line">Next line</string>
     <string name="reader_hint">Open a PDF, EPUB, DOCX, TXT or HTML file.</string>
     <string name="tagline">Read Your Way</string>
+    <string name="loading_document">Loading document…</string>
+    <string name="processing_document">Processing document…</string>
+    <string name="loading_complete">Document loaded</string>
 </resources>
