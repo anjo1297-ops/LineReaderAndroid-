@@ -11,6 +11,32 @@
         android:layout_height="wrap_content"
         android:text="@string/open_document" />
 
+    <LinearLayout
+        android:id="@+id/loadingContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp">
+
+        <TextView
+            android:id="@+id/loadingStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/loading_document"
+            android:accessibilityLiveRegion="polite" />
+
+        <ProgressBar
+            android:id="@+id/loadingProgress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:indeterminate="true"
+            android:max="100"
+            android:contentDescription="@string/loading_document" />
+    </LinearLayout>
+
     <org.example.linereader.LineReaderView
         android:id="@+id/readerView"
         android:layout_width="match_parent"
