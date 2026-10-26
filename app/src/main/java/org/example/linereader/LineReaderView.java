@@ -19,14 +19,6 @@ import android.view.accessibility.AccessibilityNodeProvider;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * FlexiReader accessibility-first reading surface.
- *
- * Normal TalkBack next/previous-item navigation moves line by line through virtual nodes.
- * Only a moving window of nearby lines is exposed to Android at any one time so very large
- * documents do not overflow the accessibility transaction. Generic/vertical accessibility
- * scrolling moves by paragraph; directional left/right scrolling moves by page.
- */
 public class LineReaderView extends View {
     private static final int HOST_VIEW_ID = -1;
 
@@ -166,9 +158,7 @@ public class LineReaderView extends View {
         rebuildCurrentLayout();
         invalidate();
 
-        if (windowChanged) {
-            sendHostContentChanged();
-        }
+        if (windowChanged) sendHostContentChanged();
         sendVirtualEvent(newIndex, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
     }
 
@@ -177,6 +167,10 @@ public class LineReaderView extends View {
                 Math.max(0, Math.min(lineIndex, lines.size() - 1)));
     }
 
+    /**
+     * Paragraphs are separated by a blank line. Single newlines inside a paragraph are retained
+     * as source line breaks and wrapped into visual lines, but they are not paragraph boundaries.
+     */
     private void rebuildLines() {
         lines.clear();
         paragraphStarts.clear();
@@ -184,9 +178,10 @@ public class LineReaderView extends View {
         headingStarts.clear();
 
         int width = Math.max(320, getWidth() - getPaddingLeft() - getPaddingRight());
-        String normalized = documentText.replace("\r\n", "\n").replace('\r', '\n');
+        String normalized = documentText.replace("\r\n", "\n").replace('\r', '\n').trim();
+        String[] paragraphs = normalized.split("\\n\\s*\\n+");
 
-        for (String paragraph : normalized.split("\n", -1)) {
+        for (String paragraph : paragraphs) {
             String p = paragraph.trim();
             if (p.isEmpty()) continue;
 
@@ -194,23 +189,33 @@ public class LineReaderView extends View {
             paragraphStarts.add(paragraphStart);
             sentenceStarts.add(paragraphStart);
 
-            if (looksLikeHeading(p)) {
+            if (looksLikeHeading(p.replace('\n', ' '))) {
                 headingStarts.add(paragraphStart);
             }
 
-            StaticLayout layout = StaticLayout.Builder.obtain(p, 0, p.length(), textPaint, width)
-                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                    .setIncludePad(false)
-                    .build();
+            String[] sourceLines = p.split("\\n");
+            for (String sourceLine : sourceLines) {
+                String source = sourceLine.trim();
+                if (source.isEmpty()) continue;
 
-            for (int i = 0; i < layout.getLineCount(); i++) {
-                int start = layout.getLineStart(i);
-                int end = layout.getLineEnd(i);
-                String line = p.substring(start, end).trim();
-                if (!line.isEmpty()) {
-                    lines.add(line);
-                    if (endsSentence(line) && i + 1 < layout.getLineCount()) {
-                        sentenceStarts.add(lines.size());
+                StaticLayout layout = StaticLayout.Builder.obtain(
+                                source, 0, source.length(), textPaint, width)
+                        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                        .setIncludePad(false)
+                        .build();
+
+                for (int i = 0; i < layout.getLineCount(); i++) {
+                    int start = layout.getLineStart(i);
+                    int end = layout.getLineEnd(i);
+                    String line = source.substring(start, end).trim();
+                    if (!line.isEmpty()) {
+                        lines.add(line);
+                        if (endsSentence(line)) {
+                            int next = lines.size();
+                            if (!sentenceStarts.contains(next)) {
+                                sentenceStarts.add(next);
+                            }
+                        }
                     }
                 }
             }
@@ -220,6 +225,12 @@ public class LineReaderView extends View {
             lines.add("No readable text was found.");
             paragraphStarts.add(0);
             sentenceStarts.add(0);
+        }
+
+        // Remove any sentence boundary that points just beyond the final line.
+        while (!sentenceStarts.isEmpty()
+                && sentenceStarts.get(sentenceStarts.size() - 1) >= lines.size()) {
+            sentenceStarts.remove(sentenceStarts.size() - 1);
         }
 
         if (lineIndex >= lines.size()) lineIndex = lines.size() - 1;
@@ -352,11 +363,9 @@ public class LineReaderView extends View {
         boolean focused = virtualId == accessibilityFocusedLine;
         info.setAccessibilityFocused(focused);
         if (focused) {
-            info.addAction(
-                    AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
         } else {
-            info.addAction(
-                    AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
         }
 
         if (virtualId < lines.size() - 1) {
@@ -388,8 +397,7 @@ public class LineReaderView extends View {
     }
 
     private void sendVirtualEvent(int virtualId, int eventType) {
-        if (virtualId < 0 || virtualId >= lines.size()) return;
-        if (!isShown()) return;
+        if (virtualId < 0 || virtualId >= lines.size() || !isShown()) return;
 
         AccessibilityEvent event = AccessibilityEvent.obtain(eventType);
         event.setPackageName(getContext().getPackageName());
@@ -399,9 +407,7 @@ public class LineReaderView extends View {
         event.setContentDescription(lines.get(virtualId));
 
         ViewParent parent = getParent();
-        if (parent != null) {
-            parent.requestSendAccessibilityEvent(this, event);
-        }
+        if (parent != null) parent.requestSendAccessibilityEvent(this, event);
     }
 
     private void sendHostContentChanged() {
@@ -411,20 +417,15 @@ public class LineReaderView extends View {
         event.setPackageName(getContext().getPackageName());
         event.setClassName("android.view.ViewGroup");
         event.setSource(this);
-        event.setContentChangeTypes(
-                AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+        event.setContentChangeTypes(AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
         ViewParent parent = getParent();
-        if (parent != null) {
-            parent.requestSendAccessibilityEvent(this, event);
-        }
+        if (parent != null) parent.requestSendAccessibilityEvent(this, event);
     }
 
     private final class LineNodeProvider extends AccessibilityNodeProvider {
         @Override
         public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
-            if (virtualViewId == HOST_VIEW_ID) {
-                return createHostNode();
-            }
+            if (virtualViewId == HOST_VIEW_ID) return createHostNode();
             return createLineNode(virtualViewId);
         }
 
@@ -449,7 +450,6 @@ public class LineReaderView extends View {
                 return true;
             }
 
-            // TalkBack commonly sends generic forward/backward for two-finger vertical scroll.
             if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
                     || action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId()) {
                 nextParagraph();
@@ -462,7 +462,6 @@ public class LineReaderView extends View {
                 return true;
             }
 
-            // Directional horizontal scroll is reserved for page movement.
             if (action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId()) {
                 nextPage();
                 return true;
@@ -477,27 +476,22 @@ public class LineReaderView extends View {
                 nextParagraph();
                 return true;
             }
-
             if (action == ACTION_PREVIOUS_PARAGRAPH) {
                 previousParagraph();
                 return true;
             }
-
             if (action == ACTION_NEXT_SENTENCE) {
                 nextSentence();
                 return true;
             }
-
             if (action == ACTION_PREVIOUS_SENTENCE) {
                 previousSentence();
                 return true;
             }
-
             if (action == ACTION_NEXT_HEADING) {
                 nextHeading();
                 return true;
             }
-
             if (action == ACTION_PREVIOUS_HEADING) {
                 previousHeading();
                 return true;
