@@ -39,28 +39,31 @@
     </LinearLayout>
 
     <LinearLayout
-        android:id="@+id/readerControls"
+        android:id="@+id/readerActions"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
+        android:orientation="horizontal"
         android:visibility="gone">
 
         <Button
             android:id="@+id/searchButton"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="@string/search_document" />
 
         <Button
             android:id="@+id/addBookmarkButton"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="@string/add_bookmark" />
 
         <Button
             android:id="@+id/bookmarksButton"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="@string/bookmarks" />
     </LinearLayout>
 
@@ -90,7 +93,7 @@
             android:contentDescription="@string/loading_document" />
     </LinearLayout>
 
-    <org.example.linereader.LineReaderView
+    <org.example.linereader.ExploreLineReaderView
         android:id="@+id/readerView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
