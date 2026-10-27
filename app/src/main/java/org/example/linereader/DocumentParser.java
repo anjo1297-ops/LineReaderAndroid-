@@ -35,9 +35,9 @@ public final class DocumentParser {
     private static final int MIN_EXTRACTED_CHARACTERS_PER_PAGE = 24;
     private static final float OCR_RENDER_SCALE = 1.5f;
 
-    /** Internal marker consumed by LineReaderView; it is never exposed as readable document text. */
     public static final String PAGE_MARKER_PREFIX = "[[[FLEXIREADER_PAGE:";
     public static final String PAGE_MARKER_SUFFIX = "]]]";
+    public static final String HEADING_MARKER = "[[[FLEXIREADER_HEADING]]]";
 
     public interface ProgressListener {
         void onProgress(String message, int current, int total);
@@ -93,15 +93,12 @@ public final class DocumentParser {
                                 "Reading page " + pageNumber + " of " + totalPages,
                                 pageNumber, totalPages);
 
-                        // Always retain the physical PDF page boundary, including blank pages.
                         appendPageMarker(out, pageNumber);
 
                         String pageText = "";
                         try {
                             pageText = extractPdfPage(doc, pageIndex);
-                        } catch (Exception ignored) {
-                            // If native extraction fails on one page, OCR that page instead.
-                        }
+                        } catch (Exception ignored) {}
 
                         if (hasUsefulText(pageText)) {
                             appendPageText(out, normalizePdfPageText(pageText));
@@ -126,7 +123,6 @@ public final class DocumentParser {
                             String ocrText = ocrResultToText(result);
                             if (!ocrText.isEmpty()) appendPageText(out, ocrText);
                         } catch (Exception ignored) {
-                            // A failed OCR page must not prevent the rest of the book from opening.
                         } finally {
                             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
                         }
@@ -211,15 +207,38 @@ public final class DocumentParser {
         XmlPullParser parser = factory.newPullParser();
         parser.setInput(new ByteArrayInputStream(xml), "UTF-8");
         StringBuilder out = new StringBuilder();
+        StringBuilder paragraph = new StringBuilder();
+        boolean paragraphHeading = false;
         int event;
         while ((event = parser.next()) != XmlPullParser.END_DOCUMENT) {
-            if (event == XmlPullParser.START_TAG && "t".equals(parser.getName())) {
-                out.append(parser.nextText());
-            } else if (event == XmlPullParser.END_TAG && "p".equals(parser.getName())) {
-                out.append("\n\n");
+            if (event == XmlPullParser.START_TAG && "p".equals(parser.getName())) {
+                paragraph.setLength(0);
+                paragraphHeading = false;
+            } else if (event == XmlPullParser.START_TAG && "pStyle".equals(parser.getName())) {
+                String style = parser.getAttributeValue(null, "val");
+                if (style == null) {
+                    for (int i = 0; i < parser.getAttributeCount(); i++) {
+                        if ("val".equals(parser.getAttributeName(i))) {
+                            style = parser.getAttributeValue(i);
+                            break;
+                        }
+                    }
+                }
+                if (style != null && style.toLowerCase().startsWith("heading")) {
+                    paragraphHeading = true;
+                }
+            } else if (event == XmlPullParser.START_TAG && "t".equals(parser.getName())) {
+                paragraph.append(parser.nextText());
             } else if (event == XmlPullParser.START_TAG
                     && ("tab".equals(parser.getName()) || "br".equals(parser.getName()))) {
-                out.append(' ');
+                paragraph.append(' ');
+            } else if (event == XmlPullParser.END_TAG && "p".equals(parser.getName())) {
+                String value = paragraph.toString().trim();
+                if (!value.isEmpty()) {
+                    if (out.length() > 0) out.append("\n\n");
+                    if (paragraphHeading) out.append(HEADING_MARKER).append('\n');
+                    out.append(value);
+                }
             }
         }
         return out.toString();
@@ -293,6 +312,7 @@ public final class DocumentParser {
         return html
                 .replaceAll("(?is)<script.*?>.*?</script>", " ")
                 .replaceAll("(?is)<style.*?>.*?</style>", " ")
+                .replaceAll("(?i)<h[1-6][^>]*>", HEADING_MARKER + "\n")
                 .replaceAll("(?i)</(p|div|h[1-6]|li|blockquote|tr)>", "\n\n")
                 .replaceAll("(?i)<br\\s*/?>", "\n")
                 .replaceAll("(?s)<[^>]+>", " ")
