@@ -11,6 +11,7 @@ import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.util.AttributeSet;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewParent;
 import android.view.accessibility.AccessibilityEvent;
@@ -31,8 +32,7 @@ public class LineReaderView extends View {
     private static final int ACTION_PREVIOUS_PARAGRAPH = 0x01020006;
     private static final int ACTION_NEXT_PAGE = 0x01020007;
     private static final int ACTION_PREVIOUS_PAGE = 0x01020008;
-    private static final int ACCESSIBILITY_WINDOW_SIZE = 401;
-    private static final int ACCESSIBILITY_WINDOW_MARGIN = 40;
+    private static final int ACCESSIBILITY_BUFFER_LINES = 2;
 
     private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<String> lines = new ArrayList<>();
@@ -46,9 +46,9 @@ public class LineReaderView extends View {
     private String documentText = "Open a document to begin.";
     private int lineIndex = 0;
     private int accessibilityFocusedLine = -1;
-    private int windowStart = 0;
-    private int windowEndExclusive = 0;
-    private StaticLayout currentLayout;
+    private int firstVisibleLine = 0;
+    private float lastTouchY;
+    private float dragRemainder;
 
     public LineReaderView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -65,8 +65,8 @@ public class LineReaderView extends View {
                 ? "No readable text was found." : text;
         lineIndex = 0;
         accessibilityFocusedLine = -1;
+        firstVisibleLine = 0;
         rebuildLines();
-        resetAccessibilityWindow(0);
         invalidate();
     }
 
@@ -128,6 +128,20 @@ public class LineReaderView extends View {
         return false;
     }
 
+    private float lineHeight() {
+        Paint.FontMetrics fm = textPaint.getFontMetrics();
+        return Math.max(1f, fm.bottom - fm.top);
+    }
+
+    private int visibleLineCount() {
+        int usableHeight = Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
+        return Math.max(1, (int) Math.floor(usableHeight / lineHeight()));
+    }
+
+    private int lastVisibleLineExclusive() {
+        return Math.min(lines.size(), firstVisibleLine + visibleLineCount());
+    }
+
     private void nextLine() { moveToLine(Math.min(lineIndex + 1, lines.size() - 1)); }
     private void previousLine() { moveToLine(Math.max(lineIndex - 1, 0)); }
 
@@ -145,20 +159,19 @@ public class LineReaderView extends View {
             }
             return;
         }
-        moveToLine(Math.min(lineIndex + linesPerScreen(), lines.size() - 1));
+        moveToLine(Math.min(lineIndex + visibleLineCount(), lines.size() - 1));
     }
 
     private void previousPage() {
         if (!pageStarts.isEmpty()) {
             int slot = currentPageSlot();
             if (slot > 0) {
-                int target = pageStarts.get(slot - 1);
-                moveToLine(Math.max(0, target));
+                moveToLine(Math.max(0, pageStarts.get(slot - 1)));
                 announcePage();
             }
             return;
         }
-        moveToLine(Math.max(lineIndex - linesPerScreen(), 0));
+        moveToLine(Math.max(lineIndex - visibleLineCount(), 0));
     }
 
     private void announcePage() {
@@ -198,14 +211,6 @@ public class LineReaderView extends View {
         }
     }
 
-    private int linesPerScreen() {
-        float lineHeight = Math.max(1f,
-                textPaint.getFontMetrics().bottom - textPaint.getFontMetrics().top);
-        int usableHeight = Math.max(1,
-                getHeight() - getPaddingTop() - getPaddingBottom());
-        return Math.max(5, (int) (usableHeight / lineHeight));
-    }
-
     private void moveToLine(int newIndex) {
         if (lines.isEmpty()) return;
         newIndex = Math.max(0, Math.min(newIndex, lines.size() - 1));
@@ -219,17 +224,44 @@ public class LineReaderView extends View {
         if (oldFocus >= 0 && oldFocus != newIndex) {
             sendVirtualEvent(oldFocus, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
         }
-        boolean windowChanged = ensureAccessibilityWindowContains(newIndex);
+
+        boolean viewportChanged = ensureLineVisible(newIndex);
         accessibilityFocusedLine = newIndex;
         lineIndex = newIndex;
-        rebuildCurrentLayout();
         invalidate();
-        if (windowChanged) sendHostContentChanged();
+
+        if (viewportChanged) sendHostContentChanged();
         sendVirtualEvent(newIndex, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
     }
 
-    private String currentLine() {
-        return lines.isEmpty() ? "" : lines.get(Math.max(0, Math.min(lineIndex, lines.size() - 1)));
+    private boolean ensureLineVisible(int target) {
+        int count = visibleLineCount();
+        int oldFirst = firstVisibleLine;
+        if (target < firstVisibleLine) {
+            firstVisibleLine = target;
+        } else if (target >= firstVisibleLine + count) {
+            firstVisibleLine = target - count + 1;
+        }
+        clampFirstVisibleLine();
+        return oldFirst != firstVisibleLine;
+    }
+
+    private void clampFirstVisibleLine() {
+        int maxFirst = Math.max(0, lines.size() - visibleLineCount());
+        firstVisibleLine = Math.max(0, Math.min(firstVisibleLine, maxFirst));
+    }
+
+    private void scrollByLines(int delta) {
+        if (delta == 0 || lines.isEmpty()) return;
+        int oldFirst = firstVisibleLine;
+        firstVisibleLine += delta;
+        clampFirstVisibleLine();
+        if (oldFirst != firstVisibleLine) {
+            lineIndex = Math.max(firstVisibleLine,
+                    Math.min(lineIndex, lastVisibleLineExclusive() - 1));
+            invalidate();
+            sendHostContentChanged();
+        }
     }
 
     private void rebuildLines() {
@@ -300,8 +332,9 @@ public class LineReaderView extends View {
             sentenceStarts.remove(sentenceStarts.size() - 1);
         }
         if (lineIndex >= lines.size()) lineIndex = lines.size() - 1;
-        resetAccessibilityWindow(lineIndex);
-        rebuildCurrentLayout();
+        clampFirstVisibleLine();
+        ensureLineVisible(lineIndex);
+        invalidate();
     }
 
     private boolean isPageMarker(String value) {
@@ -332,73 +365,92 @@ public class LineReaderView extends View {
         return p.split("\\s+").length <= 12;
     }
 
-    private void rebuildCurrentLayout() {
-        int width = Math.max(320, getWidth() - getPaddingLeft() - getPaddingRight());
-        String value = currentLine();
-        currentLayout = StaticLayout.Builder.obtain(value, 0, value.length(), textPaint, width)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setIncludePad(false)
-                .build();
-        invalidate();
-    }
-
-    private void resetAccessibilityWindow(int anchor) {
-        if (lines.isEmpty()) { windowStart = 0; windowEndExclusive = 0; return; }
-        int half = ACCESSIBILITY_WINDOW_SIZE / 2;
-        int start = Math.max(0, anchor - half);
-        int end = Math.min(lines.size(), start + ACCESSIBILITY_WINDOW_SIZE);
-        start = Math.max(0, end - ACCESSIBILITY_WINDOW_SIZE);
-        windowStart = start;
-        windowEndExclusive = end;
-    }
-
-    private boolean ensureAccessibilityWindowContains(int line) {
-        if (windowEndExclusive <= windowStart) { resetAccessibilityWindow(line); return true; }
-        boolean nearStart = line < windowStart + ACCESSIBILITY_WINDOW_MARGIN;
-        boolean nearEnd = line >= windowEndExclusive - ACCESSIBILITY_WINDOW_MARGIN;
-        if ((nearStart && windowStart > 0)
-                || (nearEnd && windowEndExclusive < lines.size())
-                || line < windowStart || line >= windowEndExclusive) {
-            int oldStart = windowStart, oldEnd = windowEndExclusive;
-            resetAccessibilityWindow(line);
-            return oldStart != windowStart || oldEnd != windowEndExclusive;
-        }
-        return false;
-    }
-
-    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         if (w != oldw) rebuildLines();
+        else {
+            clampFirstVisibleLine();
+            ensureLineVisible(lineIndex);
+        }
     }
 
-    @Override protected void onDraw(Canvas canvas) {
+    @Override
+    protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        canvas.save();
-        canvas.translate(getPaddingLeft(), getPaddingTop());
-        if (currentLayout != null) currentLayout.draw(canvas);
-        canvas.restore();
+        if (lines.isEmpty()) return;
+
+        Paint.FontMetrics fm = textPaint.getFontMetrics();
+        float height = lineHeight();
+        float baselineOffset = -fm.top;
+        float x = getPaddingLeft();
+        int end = lastVisibleLineExclusive();
+
+        for (int i = firstVisibleLine; i < end; i++) {
+            float top = getPaddingTop() + (i - firstVisibleLine) * height;
+            canvas.drawText(lines.get(i), x, top + baselineOffset, textPaint);
+        }
     }
 
-    @Override public AccessibilityNodeProvider getAccessibilityNodeProvider() { return nodeProvider; }
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        if (lines.isEmpty()) return false;
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                lastTouchY = event.getY();
+                dragRemainder = 0f;
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                float delta = lastTouchY - event.getY();
+                lastTouchY = event.getY();
+                dragRemainder += delta;
+                float height = lineHeight();
+                int lineDelta = (int) (dragRemainder / height);
+                if (lineDelta != 0) {
+                    scrollByLines(lineDelta);
+                    dragRemainder -= lineDelta * height;
+                }
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                return true;
+            default:
+                return super.onTouchEvent(event);
+        }
+    }
+
+    @Override
+    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        return nodeProvider;
+    }
 
     @Override
     public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
         info.setClassName("android.view.ViewGroup");
         info.setPackageName(getContext().getPackageName());
-        String page = getCurrentPageDescription();
-        info.setContentDescription("FlexiReader document. " + lines.size() + " lines."
-                + (page.isEmpty() ? "" : " " + page + "."));
+        info.setContentDescription(null);
         info.setFocusable(false);
         info.setScreenReaderFocusable(false);
         info.setScrollable(false);
-        for (int i = windowStart; i < windowEndExclusive; i++) info.addChild(this, i);
+
+        int start = Math.max(0, firstVisibleLine - ACCESSIBILITY_BUFFER_LINES);
+        int end = Math.min(lines.size(), lastVisibleLineExclusive() + ACCESSIBILITY_BUFFER_LINES);
+        for (int i = start; i < end; i++) info.addChild(this, i);
     }
 
     private AccessibilityNodeInfo createHostNode() {
         AccessibilityNodeInfo info = AccessibilityNodeInfo.obtain(this);
         onInitializeAccessibilityNodeInfo(info);
         return info;
+    }
+
+    private Rect lineBoundsInParent(int virtualId) {
+        float height = lineHeight();
+        int top = Math.round(getPaddingTop() + (virtualId - firstVisibleLine) * height);
+        int bottom = Math.round(top + height);
+        return new Rect(getPaddingLeft(), top,
+                Math.max(getPaddingLeft() + 1, getWidth() - getPaddingRight()), bottom);
     }
 
     private AccessibilityNodeInfo createLineNode(int virtualId) {
@@ -411,14 +463,19 @@ public class LineReaderView extends View {
         info.setText(lines.get(virtualId));
         info.setContentDescription(lines.get(virtualId));
         info.setFocusable(true);
-        info.setVisibleToUser(isShown());
         info.setEnabled(isEnabled());
 
-        int width = Math.max(1, getWidth()), height = Math.max(1, getHeight());
-        info.setBoundsInParent(new Rect(0, 0, width, height));
+        Rect parentBounds = lineBoundsInParent(virtualId);
+        info.setBoundsInParent(parentBounds);
         int[] location = new int[2];
         getLocationOnScreen(location);
-        info.setBoundsInScreen(new Rect(location[0], location[1], location[0] + width, location[1] + height));
+        Rect screenBounds = new Rect(parentBounds);
+        screenBounds.offset(location[0], location[1]);
+        info.setBoundsInScreen(screenBounds);
+
+        boolean actuallyVisible = virtualId >= firstVisibleLine
+                && virtualId < lastVisibleLineExclusive();
+        info.setVisibleToUser(isShown() && actuallyVisible);
 
         boolean focused = virtualId == accessibilityFocusedLine;
         info.setAccessibilityFocused(focused);
@@ -496,16 +553,20 @@ public class LineReaderView extends View {
     }
 
     private final class LineNodeProvider extends AccessibilityNodeProvider {
-        @Override public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
+        @Override
+        public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
             return virtualViewId == HOST_VIEW_ID ? createHostNode() : createLineNode(virtualViewId);
         }
 
         @Override
         public boolean performAction(int virtualViewId, int action, Bundle arguments) {
-            if (virtualViewId == HOST_VIEW_ID) return LineReaderView.this.performAccessibilityAction(action, arguments);
+            if (virtualViewId == HOST_VIEW_ID) {
+                return LineReaderView.this.performAccessibilityAction(action, arguments);
+            }
             if (virtualViewId < 0 || virtualViewId >= lines.size()) return false;
             if (action == AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS) {
-                focusVirtualLine(virtualViewId); return true;
+                focusVirtualLine(virtualViewId);
+                return true;
             }
             if (action == AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS) {
                 if (accessibilityFocusedLine == virtualViewId) {
@@ -531,7 +592,8 @@ public class LineReaderView extends View {
             return false;
         }
 
-        @Override public AccessibilityNodeInfo findFocus(int focus) {
+        @Override
+        public AccessibilityNodeInfo findFocus(int focus) {
             return focus == AccessibilityNodeInfo.FOCUS_ACCESSIBILITY && accessibilityFocusedLine >= 0
                     ? createLineNode(accessibilityFocusedLine) : null;
         }
