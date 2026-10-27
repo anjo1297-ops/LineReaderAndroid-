@@ -1,6 +1,9 @@
 <resources>
-    <style name="Theme.LineReader" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <style name="Theme.LineReader" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorBackground">#FFFFFF</item>
+        <item name="android:textColorPrimary">#000000</item>
+        <item name="android:windowBackground">#FFFFFF</item>
     </style>
 </resources>
