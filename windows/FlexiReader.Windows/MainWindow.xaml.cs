@@ -1,7 +1,7 @@
 using DocumentFormat.OpenXml.Packaging;
 using HtmlAgilityPack;
 using Microsoft.Win32;
-using System.Collections.ObjectModel;
+using System.IO;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -14,13 +14,14 @@ namespace FlexiReader.Windows;
 
 public partial class MainWindow : Window
 {
-    public ObservableCollection<ReaderLine> Lines { get; } = new();
     public ICommand OpenCommand { get; }
     public ICommand SearchCommand { get; }
     public ICommand BookmarkCommand { get; }
     public ICommand PositionCommand { get; }
 
     private readonly AppStateStore stateStore = new();
+    private readonly List<ReaderLine> paragraphs = new();
+    private readonly List<int> paragraphStarts = new();
     private AppState state;
     private string? currentPath;
     private string currentSearch = string.Empty;
@@ -30,13 +31,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         state = stateStore.Load();
-        ReaderList.ItemsSource = Lines;
-        DataContext = this;
 
         OpenCommand = new RelayCommand(_ => OpenDocument());
         SearchCommand = new RelayCommand(_ => SearchDocument());
         BookmarkCommand = new RelayCommand(_ => AddBookmark());
         PositionCommand = new RelayCommand(_ => AnnouncePosition());
+        DataContext = this;
 
         Loaded += (_, _) => OpenButton.Focus();
         Closing += (_, _) => SaveCurrentPosition();
@@ -64,13 +64,15 @@ public partial class MainWindow : Window
         try
         {
             SaveCurrentPosition();
-            StatusText.Text = "Opening " + System.IO.Path.GetFileName(path) + "...";
+            StatusText.Text = "Opening " + Path.GetFileName(path) + "...";
             var document = DocumentLoader.Load(path);
+
             suppressSave = true;
-            Lines.Clear();
-            foreach (var line in document.Lines) Lines.Add(line);
+            paragraphs.Clear();
+            paragraphs.AddRange(document.Lines);
+            BuildTextSurface();
             currentPath = path;
-            DocumentTitle.Text = System.IO.Path.GetFileName(path);
+            DocumentTitle.Text = Path.GetFileName(path);
 
             if (addRecent)
             {
@@ -80,11 +82,9 @@ public partial class MainWindow : Window
             }
 
             int saved = state.Positions.TryGetValue(path, out var pos) ? pos : 0;
-            saved = Math.Clamp(saved, 0, Math.Max(0, Lines.Count - 1));
-            ReaderList.SelectedIndex = saved;
-            ReaderList.ScrollIntoView(ReaderList.SelectedItem);
+            MoveToParagraph(Math.Clamp(saved, 0, Math.Max(0, paragraphs.Count - 1)), false);
             suppressSave = false;
-            ReaderList.Focus();
+            ReaderText.Focus();
             UpdateStatus();
             stateStore.Save(state);
         }
@@ -96,47 +96,64 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ReaderList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void BuildTextSurface()
     {
-        if (ReaderList.SelectedIndex >= 0)
+        paragraphStarts.Clear();
+        var sb = new StringBuilder();
+        for (int i = 0; i < paragraphs.Count; i++)
         {
-            ReaderList.ScrollIntoView(ReaderList.SelectedItem);
-            UpdateStatus();
-            if (!suppressSave) SaveCurrentPosition();
+            if (i > 0) sb.Append(Environment.NewLine).Append(Environment.NewLine);
+            paragraphStarts.Add(sb.Length);
+            sb.Append(paragraphs[i].Text.Trim());
         }
+        ReaderText.Text = sb.ToString();
+        ReaderText.CaretIndex = 0;
     }
 
-    private void ReaderList_KeyDown(object sender, KeyEventArgs e)
+    private void ReaderText_SelectionChanged(object sender, RoutedEventArgs e)
     {
-        if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
+        if (paragraphs.Count == 0) return;
+        UpdateStatus();
+        if (!suppressSave) SaveCurrentPosition();
+    }
+
+    private void ReaderText_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F3 && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
         {
-            MoveTo(0); e.Handled = true;
-        }
-        else if (e.Key == Key.End && Keyboard.Modifiers == ModifierKeys.Control)
-        {
-            MoveTo(Lines.Count - 1); e.Handled = true;
+            FindPrevious();
+            e.Handled = true;
         }
         else if (e.Key == Key.F3)
         {
-            FindNext(); e.Handled = true;
-        }
-        else if (e.Key == Key.F3 && Keyboard.Modifiers == ModifierKeys.Shift)
-        {
-            FindPrevious(); e.Handled = true;
+            FindNext();
+            e.Handled = true;
         }
     }
 
-    private void MoveTo(int index)
+    private int GetCurrentParagraphIndex()
     {
-        if (Lines.Count == 0) return;
-        ReaderList.SelectedIndex = Math.Clamp(index, 0, Lines.Count - 1);
-        ReaderList.ScrollIntoView(ReaderList.SelectedItem);
-        ReaderList.Focus();
+        if (paragraphStarts.Count == 0) return -1;
+        int caret = Math.Clamp(ReaderText.CaretIndex, 0, ReaderText.Text.Length);
+        int index = paragraphStarts.BinarySearch(caret);
+        if (index >= 0) return index;
+        index = ~index - 1;
+        return Math.Clamp(index, 0, paragraphStarts.Count - 1);
+    }
+
+    private void MoveToParagraph(int index, bool focus = true)
+    {
+        if (paragraphs.Count == 0 || paragraphStarts.Count == 0) return;
+        index = Math.Clamp(index, 0, paragraphs.Count - 1);
+        ReaderText.CaretIndex = paragraphStarts[index];
+        ReaderText.SelectionLength = 0;
+        ReaderText.ScrollToLine(ReaderText.GetLineIndexFromCharacterIndex(ReaderText.CaretIndex));
+        if (focus) ReaderText.Focus();
     }
 
     private void SearchDocument()
     {
-        if (Lines.Count == 0) return;
+        if (ReaderText.Text.Length == 0) return;
         string? value = PromptWindow.Ask(this, "Search document", "Search for:", currentSearch);
         if (string.IsNullOrWhiteSpace(value)) return;
         currentSearch = value;
@@ -145,46 +162,50 @@ public partial class MainWindow : Window
 
     private bool FindNext()
     {
-        if (string.IsNullOrWhiteSpace(currentSearch) || Lines.Count == 0) return false;
-        int start = Math.Max(0, ReaderList.SelectedIndex + 1);
-        for (int pass = 0; pass < 2; pass++)
-        {
-            int from = pass == 0 ? start : 0;
-            int to = pass == 0 ? Lines.Count : Math.Min(start, Lines.Count);
-            for (int i = from; i < to; i++)
-            {
-                if (Lines[i].Text.Contains(currentSearch, StringComparison.OrdinalIgnoreCase)) { MoveTo(i); return true; }
-            }
-        }
-        return false;
+        if (string.IsNullOrWhiteSpace(currentSearch) || ReaderText.Text.Length == 0) return false;
+        int start = Math.Min(ReaderText.Text.Length, ReaderText.CaretIndex + Math.Max(1, ReaderText.SelectionLength));
+        int found = ReaderText.Text.IndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
+        if (found < 0 && start > 0) found = ReaderText.Text.IndexOf(currentSearch, 0, StringComparison.OrdinalIgnoreCase);
+        if (found < 0) return false;
+        SelectSearchResult(found);
+        return true;
     }
 
     private bool FindPrevious()
     {
-        if (string.IsNullOrWhiteSpace(currentSearch) || Lines.Count == 0) return false;
-        int start = ReaderList.SelectedIndex <= 0 ? Lines.Count - 1 : ReaderList.SelectedIndex - 1;
-        for (int i = start; i >= 0; i--)
-            if (Lines[i].Text.Contains(currentSearch, StringComparison.OrdinalIgnoreCase)) { MoveTo(i); return true; }
-        for (int i = Lines.Count - 1; i > start; i--)
-            if (Lines[i].Text.Contains(currentSearch, StringComparison.OrdinalIgnoreCase)) { MoveTo(i); return true; }
-        return false;
+        if (string.IsNullOrWhiteSpace(currentSearch) || ReaderText.Text.Length == 0) return false;
+        int start = Math.Max(0, ReaderText.CaretIndex - 1);
+        int found = ReaderText.Text.LastIndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
+        if (found < 0 && ReaderText.Text.Length > 0)
+            found = ReaderText.Text.LastIndexOf(currentSearch, ReaderText.Text.Length - 1, StringComparison.OrdinalIgnoreCase);
+        if (found < 0) return false;
+        SelectSearchResult(found);
+        return true;
+    }
+
+    private void SelectSearchResult(int offset)
+    {
+        ReaderText.Focus();
+        ReaderText.Select(offset, currentSearch.Length);
+        ReaderText.ScrollToLine(ReaderText.GetLineIndexFromCharacterIndex(offset));
     }
 
     private void AddBookmark()
     {
-        if (currentPath is null || ReaderList.SelectedIndex < 0) return;
+        if (currentPath is null) return;
+        int index = GetCurrentParagraphIndex();
+        if (index < 0) return;
         if (!state.Bookmarks.TryGetValue(currentPath, out var list))
         {
             list = new List<BookmarkEntry>();
             state.Bookmarks[currentPath] = list;
         }
-        int index = ReaderList.SelectedIndex;
         if (list.Any(b => b.LineIndex == index))
         {
             StatusText.Text = "Bookmark already exists at this position.";
             return;
         }
-        list.Add(new BookmarkEntry(index, Lines[index].Text));
+        list.Add(new BookmarkEntry(index, paragraphs[index].Text));
         list.Sort((a, b) => a.LineIndex.CompareTo(b.LineIndex));
         stateStore.Save(state);
         StatusText.Text = "Bookmark added at " + GetPercent(index) + " percent.";
@@ -197,9 +218,15 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "There are no bookmarks in this document.", "Bookmarks", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        var choices = list.Select(b => $"{GetPercent(b.LineIndex)} percent — {TrimForLabel(b.Text)}").ToList();
+        var valid = list.Where(b => b.LineIndex >= 0 && b.LineIndex < paragraphs.Count).ToList();
+        if (valid.Count == 0)
+        {
+            MessageBox.Show(this, "There are no valid bookmarks in this document.", "Bookmarks", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var choices = valid.Select(b => $"{GetPercent(b.LineIndex)} percent — {TrimForLabel(b.Text)}").ToList();
         int selected = ChoiceWindow.Choose(this, "Bookmarks", choices);
-        if (selected >= 0) MoveTo(list[selected].LineIndex);
+        if (selected >= 0) MoveToParagraph(valid[selected].LineIndex);
     }
 
     private void ShowRecent()
@@ -210,34 +237,43 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "There are no recent documents.", "Recent documents", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        var choices = existing.Select(p => System.IO.Path.GetFileName(p)).ToList();
+        var choices = existing.Select(Path.GetFileName).ToList();
         int selected = ChoiceWindow.Choose(this, "Recent documents", choices);
         if (selected >= 0) OpenPath(existing[selected], true);
     }
 
     private void AnnouncePosition()
     {
-        if (Lines.Count == 0) return;
-        StatusText.Text = "Reading position: " + GetPercent(Math.Max(0, ReaderList.SelectedIndex)) + " percent.";
+        int index = GetCurrentParagraphIndex();
+        if (index < 0) return;
+        string page = paragraphs[index].PageNumber is int p ? $" Page {p}." : string.Empty;
+        StatusText.Text = $"Reading position: {GetPercent(index)} percent.{page}";
     }
 
     private int GetPercent(int index)
     {
-        if (Lines.Count <= 1) return 0;
-        return Math.Clamp((int)Math.Round(index * 100.0 / (Lines.Count - 1)), 0, 100);
+        if (paragraphs.Count <= 1) return 0;
+        return Math.Clamp((int)Math.Round(index * 100.0 / (paragraphs.Count - 1)), 0, 100);
     }
 
     private void UpdateStatus()
     {
-        if (Lines.Count == 0) { StatusText.Text = "Open a document to begin."; return; }
-        int index = Math.Max(0, ReaderList.SelectedIndex);
-        StatusText.Text = $"{GetPercent(index)} percent through document. Line {index + 1} of {Lines.Count}.";
+        int index = GetCurrentParagraphIndex();
+        if (index < 0)
+        {
+            StatusText.Text = "Open a document to begin.";
+            return;
+        }
+        string page = paragraphs[index].PageNumber is int p ? $" Page {p}." : string.Empty;
+        StatusText.Text = $"{GetPercent(index)} percent through document.{page}";
     }
 
     private void SaveCurrentPosition()
     {
-        if (currentPath is null || ReaderList.SelectedIndex < 0) return;
-        state.Positions[currentPath] = ReaderList.SelectedIndex;
+        if (currentPath is null) return;
+        int index = GetCurrentParagraphIndex();
+        if (index < 0) return;
+        state.Positions[currentPath] = index;
         stateStore.Save(state);
     }
 
@@ -259,15 +295,17 @@ public sealed class AppStateStore
     private readonly string path;
     public AppStateStore()
     {
-        string folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlexiReader");
+        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlexiReader");
         Directory.CreateDirectory(folder);
-        path = System.IO.Path.Combine(folder, "state.json");
+        path = Path.Combine(folder, "state.json");
     }
+
     public AppState Load()
     {
         try { return File.Exists(path) ? JsonSerializer.Deserialize<AppState>(File.ReadAllText(path)) ?? new AppState() : new AppState(); }
         catch { return new AppState(); }
     }
+
     public void Save(AppState value)
     {
         try { File.WriteAllText(path, JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true })); } catch { }
@@ -278,7 +316,7 @@ public static class DocumentLoader
 {
     public static LoadedDocument Load(string path)
     {
-        string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+        string ext = Path.GetExtension(path).ToLowerInvariant();
         return ext switch
         {
             ".pdf" => LoadPdf(path),
@@ -296,8 +334,8 @@ public static class DocumentLoader
         using var pdf = PdfDocument.Open(path);
         foreach (var page in pdf.GetPages())
         {
-            string text = page.Text;
-            foreach (var line in NormalizeLines(text)) result.Add(new ReaderLine(line, false, page.Number));
+            string text = NormalizeWhitespace(page.Text);
+            if (text.Length > 0) result.Add(new ReaderLine(text, false, page.Number));
         }
         return new LoadedDocument(result);
     }
@@ -310,7 +348,7 @@ public static class DocumentLoader
         if (body is null) return new LoadedDocument(result);
         foreach (var p in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Paragraph>())
         {
-            string text = p.InnerText?.Trim() ?? string.Empty;
+            string text = NormalizeWhitespace(p.InnerText ?? string.Empty);
             if (text.Length == 0) continue;
             string style = p.ParagraphProperties?.ParagraphStyleId?.Val?.Value ?? string.Empty;
             bool heading = style.StartsWith("Heading", StringComparison.OrdinalIgnoreCase);
@@ -330,7 +368,10 @@ public static class DocumentLoader
     {
         var result = new List<ReaderLine>();
         using var zip = ZipFile.OpenRead(path);
-        foreach (var entry in zip.Entries.Where(e => e.FullName.EndsWith(".xhtml", StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith(".htm", StringComparison.OrdinalIgnoreCase)).OrderBy(e => e.FullName))
+        foreach (var entry in zip.Entries.Where(e =>
+                     e.FullName.EndsWith(".xhtml", StringComparison.OrdinalIgnoreCase) ||
+                     e.FullName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                     e.FullName.EndsWith(".htm", StringComparison.OrdinalIgnoreCase)).OrderBy(e => e.FullName))
         {
             using var stream = entry.Open();
             using var reader = new StreamReader(stream, Encoding.UTF8, true);
@@ -348,7 +389,7 @@ public static class DocumentLoader
         if (nodes is null) return FromText(HtmlEntity.DeEntitize(html.DocumentNode.InnerText));
         foreach (var node in nodes)
         {
-            string text = HtmlEntity.DeEntitize(node.InnerText).Trim();
+            string text = NormalizeWhitespace(HtmlEntity.DeEntitize(node.InnerText));
             if (text.Length == 0) continue;
             bool heading = node.Name.StartsWith("h", StringComparison.OrdinalIgnoreCase) && node.Name.Length == 2 && char.IsDigit(node.Name[1]);
             result.Add(new ReaderLine(text, heading));
@@ -356,17 +397,36 @@ public static class DocumentLoader
         return new LoadedDocument(result);
     }
 
-    private static LoadedDocument FromText(string text) => new(NormalizeLines(text).Select(x => new ReaderLine(x)).ToList());
-
-    private static IEnumerable<string> NormalizeLines(string text)
+    private static LoadedDocument FromText(string text)
     {
-        using var reader = new StringReader(text.Replace("\r\n", "\n").Replace('\r', '\n'));
-        string? line;
-        while ((line = reader.ReadLine()) is not null)
+        string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var result = new List<ReaderLine>();
+        foreach (string block in normalized.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries))
         {
-            string value = line.Trim();
-            if (value.Length > 0) yield return value;
+            string paragraph = NormalizeWhitespace(block);
+            if (paragraph.Length > 0) result.Add(new ReaderLine(paragraph));
         }
+        return new LoadedDocument(result);
+    }
+
+    private static string NormalizeWhitespace(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        bool pendingSpace = false;
+        foreach (char c in text)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                pendingSpace = sb.Length > 0;
+            }
+            else
+            {
+                if (pendingSpace) sb.Append(' ');
+                sb.Append(c);
+                pendingSpace = false;
+            }
+        }
+        return sb.ToString().Trim();
     }
 }
 
@@ -394,7 +454,10 @@ public static class PromptWindow
         var ok = new Button { Content = "OK", Width = 80, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
         var cancel = new Button { Content = "Cancel", Width = 80, IsCancel = true };
         ok.Click += (_, _) => { window.DialogResult = true; window.Close(); };
-        buttons.Children.Add(ok); buttons.Children.Add(cancel); panel.Children.Add(buttons); window.Content = panel;
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+        panel.Children.Add(buttons);
+        window.Content = panel;
         window.Loaded += (_, _) => { box.Focus(); box.SelectAll(); };
         return window.ShowDialog() == true ? box.Text : null;
     }
@@ -408,9 +471,11 @@ public static class ChoiceWindow
         var window = new Window { Title = title, Width = 620, Height = 450, Owner = owner, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var panel = new DockPanel { Margin = new Thickness(12) };
         var list = new ListBox { ItemsSource = items };
-        DockPanel.SetDock(list, Dock.Top); panel.Children.Add(list);
+        DockPanel.SetDock(list, Dock.Top);
+        panel.Children.Add(list);
         var open = new Button { Content = "Open", Height = 34, Margin = new Thickness(0, 8, 0, 0), IsDefault = true };
-        DockPanel.SetDock(open, Dock.Bottom); panel.Children.Add(open);
+        DockPanel.SetDock(open, Dock.Bottom);
+        panel.Children.Add(open);
         open.Click += (_, _) => { chosen = list.SelectedIndex; if (chosen >= 0) { window.DialogResult = true; window.Close(); } };
         list.MouseDoubleClick += (_, _) => open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         window.Content = panel;
