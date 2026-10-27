@@ -35,6 +35,10 @@ public final class DocumentParser {
     private static final int MIN_EXTRACTED_CHARACTERS_PER_PAGE = 24;
     private static final float OCR_RENDER_SCALE = 1.5f;
 
+    /** Internal marker consumed by LineReaderView; it is never exposed as readable document text. */
+    public static final String PAGE_MARKER_PREFIX = "[[[FLEXIREADER_PAGE:";
+    public static final String PAGE_MARKER_SUFFIX = "]]]";
+
     public interface ProgressListener {
         void onProgress(String message, int current, int total);
     }
@@ -89,16 +93,18 @@ public final class DocumentParser {
                                 "Reading page " + pageNumber + " of " + totalPages,
                                 pageNumber, totalPages);
 
+                        // Always retain the physical PDF page boundary, including blank pages.
+                        appendPageMarker(out, pageNumber);
+
                         String pageText = "";
                         try {
                             pageText = extractPdfPage(doc, pageIndex);
                         } catch (Exception ignored) {
-                            // If native extraction fails on one page, OCR that page instead of
-                            // aborting the entire document.
+                            // If native extraction fails on one page, OCR that page instead.
                         }
 
                         if (hasUsefulText(pageText)) {
-                            appendPage(out, normalizePdfPageText(pageText));
+                            appendPageText(out, normalizePdfPageText(pageText));
                             continue;
                         }
 
@@ -118,10 +124,9 @@ public final class DocumentParser {
                             InputImage image = InputImage.fromBitmap(bitmap, 0);
                             Text result = Tasks.await(recognizer.process(image));
                             String ocrText = ocrResultToText(result);
-                            if (!ocrText.isEmpty()) appendPage(out, ocrText);
-                        } catch (Exception ocrError) {
-                            // OCR failure on one page must not prevent already-readable pages from
-                            // opening. Continue through the document and preserve any text found.
+                            if (!ocrText.isEmpty()) appendPageText(out, ocrText);
+                        } catch (Exception ignored) {
+                            // A failed OCR page must not prevent the rest of the book from opening.
                         } finally {
                             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
                         }
@@ -131,11 +136,24 @@ public final class DocumentParser {
                 }
 
                 String result = out.toString().trim();
-                return result.isEmpty()
-                        ? "No readable text was found in this PDF."
-                        : result;
+                if (result.replaceAll("\\[\\[\\[FLEXIREADER_PAGE:\\d+]]]", "")
+                        .trim().isEmpty()) {
+                    return PAGE_MARKER_PREFIX + "1" + PAGE_MARKER_SUFFIX
+                            + "\nNo readable text was found in this PDF.";
+                }
+                return result;
             }
         }
+    }
+
+    private static void appendPageMarker(StringBuilder out, int pageNumber) {
+        if (out.length() > 0) out.append("\n\n");
+        out.append(PAGE_MARKER_PREFIX).append(pageNumber).append(PAGE_MARKER_SUFFIX);
+    }
+
+    private static void appendPageText(StringBuilder out, String pageText) {
+        if (pageText == null || pageText.trim().isEmpty()) return;
+        out.append('\n').append(pageText.trim());
     }
 
     private static String extractPdfPage(PDDocument doc, int zeroBasedPage) throws Exception {
@@ -178,12 +196,6 @@ public final class DocumentParser {
             }
         }
         return out.toString().trim();
-    }
-
-    private static void appendPage(StringBuilder out, String pageText) {
-        if (pageText == null || pageText.trim().isEmpty()) return;
-        if (out.length() > 0) out.append("\n\n");
-        out.append(pageText.trim());
     }
 
     private static String parseDocx(byte[] data) throws Exception {
@@ -323,7 +335,7 @@ public final class DocumentParser {
         }
     }
 
-    private static String getFileName(Context context, Uri uri) {
+    public static String getFileName(Context context, Uri uri) {
         String result = "document";
         try (android.database.Cursor cursor = context.getContentResolver()
                 .query(uri, null, null, null, null)) {
