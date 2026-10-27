@@ -1,0 +1,55 @@
+<Window x:Class="FlexiReader.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
+        Title="FlexiReader 0.1.3"
+        Width="1000" Height="720"
+        MinWidth="640" MinHeight="420"
+        WindowStartupLocation="CenterScreen">
+  <DockPanel>
+    <Menu DockPanel.Dock="Top">
+      <MenuItem Header="_File">
+        <MenuItem Header="_Open..." InputGestureText="Ctrl+O" Click="Open_Click" />
+        <Separator />
+        <MenuItem Header="E_xit" Click="Exit_Click" />
+      </MenuItem>
+      <MenuItem Header="_Navigate">
+        <MenuItem Header="Go to _start" InputGestureText="Ctrl+Home" Click="Start_Click" />
+        <MenuItem Header="Go to _end" InputGestureText="Ctrl+End" Click="End_Click" />
+      </MenuItem>
+      <MenuItem Header="_Search">
+        <MenuItem Header="_Find..." InputGestureText="Ctrl+F" Click="Find_Click" />
+        <MenuItem Header="Find _next" InputGestureText="F3" Click="FindNext_Click" />
+        <MenuItem Header="Find _previous" InputGestureText="Shift+F3" Click="FindPrevious_Click" />
+      </MenuItem>
+      <MenuItem Header="_Help">
+        <MenuItem Header="_About" Click="About_Click" />
+      </MenuItem>
+    </Menu>
+
+    <StatusBar DockPanel.Dock="Bottom">
+      <StatusBarItem>
+        <TextBlock x:Name="StatusText" Text="Ready. Press Ctrl+O to open a document." />
+      </StatusBarItem>
+    </StatusBar>
+
+    <Grid Margin="8">
+      <TextBox x:Name="Reader"
+               IsReadOnly="True"
+               IsReadOnlyCaretVisible="True"
+               AcceptsReturn="True"
+               AcceptsTab="False"
+               TextWrapping="Wrap"
+               VerticalScrollBarVisibility="Auto"
+               HorizontalScrollBarVisibility="Disabled"
+               SpellCheck.IsEnabled="False"
+               FontSize="18"
+               Padding="10"
+               Focusable="True"
+               IsTabStop="True"
+               automation:AutomationProperties.Name="Document text"
+               automation:AutomationProperties.HelpText="Read-only document text. Use normal JAWS or Windows caret navigation keys, including Up and Down Arrow, Home, End, Page Up and Page Down."
+               SelectionChanged="Reader_SelectionChanged" />
+    </Grid>
+  </DockPanel>
+</Window>
