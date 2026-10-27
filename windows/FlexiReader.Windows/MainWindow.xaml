@@ -33,17 +33,16 @@
             </Grid.RowDefinitions>
             <TextBlock x:Name="DocumentTitle" Grid.Row="0" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,8"
                        Text="FlexiReader" AutomationProperties.HeadingLevel="Level1"/>
-            <TextBox x:Name="ReaderText" Grid.Row="1"
-                     IsReadOnly="True"
-                     AcceptsReturn="True"
-                     TextWrapping="Wrap"
-                     FontSize="18"
-                     Padding="8"
-                     VerticalScrollBarVisibility="Auto"
-                     HorizontalScrollBarVisibility="Disabled"
-                     SelectionChanged="ReaderText_SelectionChanged"
-                     KeyDown="ReaderText_KeyDown"
-                     AutomationProperties.Name="Document text. Use the arrow keys to read normally."/>
+            <RichTextBox x:Name="ReaderText" Grid.Row="1"
+                         IsReadOnly="True"
+                         IsDocumentEnabled="True"
+                         FontSize="18"
+                         Padding="8"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled"
+                         SelectionChanged="ReaderText_SelectionChanged"
+                         KeyDown="ReaderText_KeyDown"
+                         AutomationProperties.Name="Document text. Use the arrow keys to read normally."/>
         </Grid>
     </DockPanel>
 </Window>
