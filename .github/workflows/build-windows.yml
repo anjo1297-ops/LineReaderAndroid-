@@ -1,0 +1,38 @@
+name: Build FlexiReader Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore Windows project
+        run: dotnet restore windows/FlexiReader.Windows/FlexiReader.Windows.csproj
+
+      - name: Publish portable Windows build
+        run: dotnet publish windows/FlexiReader.Windows/FlexiReader.Windows.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o windows/publish
+
+      - name: Create ZIP package
+        shell: pwsh
+        run: Compress-Archive -Path windows/publish/* -DestinationPath windows/FlexiReader-Windows-0.1-win-x64.zip -Force
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlexiReader-Windows-0.1-win-x64
+          path: windows/FlexiReader-Windows-0.1-win-x64.zip
+          if-no-files-found: error
