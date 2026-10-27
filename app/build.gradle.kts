@@ -10,8 +10,8 @@ android {
         applicationId = "org.example.linereader"
         minSdk = 24
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.5.1"
+        versionCode = 10
+        versionName = "0.6"
     }
 }
 
