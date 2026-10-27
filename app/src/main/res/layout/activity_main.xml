@@ -17,6 +17,12 @@
             android:layout_height="wrap_content"
             android:text="@string/open_document" />
 
+        <Button
+            android:id="@+id/settingsButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings" />
+
         <TextView
             android:id="@+id/recentHeading"
             android:layout_width="match_parent"
@@ -32,12 +38,31 @@
             android:orientation="vertical" />
     </LinearLayout>
 
-    <Button
-        android:id="@+id/searchButton"
+    <LinearLayout
+        android:id="@+id/readerControls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/search_document"
-        android:visibility="gone" />
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/searchButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/search_document" />
+
+        <Button
+            android:id="@+id/addBookmarkButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/add_bookmark" />
+
+        <Button
+            android:id="@+id/bookmarksButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/bookmarks" />
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/loadingContainer"
