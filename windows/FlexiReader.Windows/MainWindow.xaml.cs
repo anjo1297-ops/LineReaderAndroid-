@@ -7,8 +7,10 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace FlexiReader.Windows;
 
@@ -21,7 +23,8 @@ public partial class MainWindow : Window
 
     private readonly AppStateStore stateStore = new();
     private readonly List<ReaderLine> paragraphs = new();
-    private readonly List<int> paragraphStarts = new();
+    private readonly List<Paragraph> paragraphBlocks = new();
+    private readonly List<Run> paragraphRuns = new();
     private AppState state;
     private string? currentPath;
     private string currentSearch = string.Empty;
@@ -70,7 +73,7 @@ public partial class MainWindow : Window
             suppressSave = true;
             paragraphs.Clear();
             paragraphs.AddRange(document.Lines);
-            BuildTextSurface();
+            BuildFlowDocument();
             currentPath = path;
             DocumentTitle.Text = Path.GetFileName(path);
 
@@ -96,18 +99,39 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BuildTextSurface()
+    private void BuildFlowDocument()
     {
-        paragraphStarts.Clear();
-        var sb = new StringBuilder();
-        for (int i = 0; i < paragraphs.Count; i++)
+        paragraphBlocks.Clear();
+        paragraphRuns.Clear();
+
+        var flow = new FlowDocument
         {
-            if (i > 0) sb.Append(Environment.NewLine).Append(Environment.NewLine);
-            paragraphStarts.Add(sb.Length);
-            sb.Append(paragraphs[i].Text.Trim());
+            PagePadding = new Thickness(4),
+            ColumnWidth = double.PositiveInfinity,
+            TextAlignment = TextAlignment.Left
+        };
+
+        foreach (var item in paragraphs)
+        {
+            var run = new Run(item.Text.Trim());
+            var paragraph = new Paragraph(run)
+            {
+                Margin = new Thickness(0, 0, 0, 10),
+                TextAlignment = TextAlignment.Left
+            };
+            if (item.IsHeading)
+            {
+                paragraph.FontWeight = FontWeights.Bold;
+                paragraph.FontSize = 20;
+            }
+            flow.Blocks.Add(paragraph);
+            paragraphBlocks.Add(paragraph);
+            paragraphRuns.Add(run);
         }
-        ReaderText.Text = sb.ToString();
-        ReaderText.CaretIndex = 0;
+
+        ReaderText.Document = flow;
+        if (paragraphBlocks.Count > 0)
+            ReaderText.CaretPosition = paragraphBlocks[0].ContentStart;
     }
 
     private void ReaderText_SelectionChanged(object sender, RoutedEventArgs e)
@@ -133,27 +157,40 @@ public partial class MainWindow : Window
 
     private int GetCurrentParagraphIndex()
     {
-        if (paragraphStarts.Count == 0) return -1;
-        int caret = Math.Clamp(ReaderText.CaretIndex, 0, ReaderText.Text.Length);
-        int index = paragraphStarts.BinarySearch(caret);
-        if (index >= 0) return index;
-        index = ~index - 1;
-        return Math.Clamp(index, 0, paragraphStarts.Count - 1);
+        if (paragraphBlocks.Count == 0) return -1;
+        TextPointer caret = ReaderText.CaretPosition;
+        for (int i = 0; i < paragraphBlocks.Count; i++)
+        {
+            var p = paragraphBlocks[i];
+            if (caret.CompareTo(p.ContentStart) >= 0 && caret.CompareTo(p.ContentEnd) <= 0)
+                return i;
+        }
+        return 0;
+    }
+
+    private int GetOffsetWithinParagraph(int index)
+    {
+        if (index < 0 || index >= paragraphBlocks.Count) return 0;
+        var start = paragraphBlocks[index].ContentStart;
+        var caret = ReaderText.CaretPosition;
+        if (caret.CompareTo(start) < 0 || caret.CompareTo(paragraphBlocks[index].ContentEnd) > 0) return 0;
+        return Math.Clamp(new TextRange(start, caret).Text.Length, 0, paragraphs[index].Text.Length);
     }
 
     private void MoveToParagraph(int index, bool focus = true)
     {
-        if (paragraphs.Count == 0 || paragraphStarts.Count == 0) return;
+        if (paragraphs.Count == 0 || paragraphBlocks.Count == 0) return;
         index = Math.Clamp(index, 0, paragraphs.Count - 1);
-        ReaderText.CaretIndex = paragraphStarts[index];
-        ReaderText.SelectionLength = 0;
-        ReaderText.ScrollToLine(ReaderText.GetLineIndexFromCharacterIndex(ReaderText.CaretIndex));
+        var position = paragraphBlocks[index].ContentStart;
+        ReaderText.CaretPosition = position;
+        ReaderText.Selection.Select(position, position);
+        paragraphBlocks[index].BringIntoView();
         if (focus) ReaderText.Focus();
     }
 
     private void SearchDocument()
     {
-        if (ReaderText.Text.Length == 0) return;
+        if (paragraphs.Count == 0) return;
         string? value = PromptWindow.Ask(this, "Search document", "Search for:", currentSearch);
         if (string.IsNullOrWhiteSpace(value)) return;
         currentSearch = value;
@@ -162,32 +199,66 @@ public partial class MainWindow : Window
 
     private bool FindNext()
     {
-        if (string.IsNullOrWhiteSpace(currentSearch) || ReaderText.Text.Length == 0) return false;
-        int start = Math.Min(ReaderText.Text.Length, ReaderText.CaretIndex + Math.Max(1, ReaderText.SelectionLength));
-        int found = ReaderText.Text.IndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
-        if (found < 0 && start > 0) found = ReaderText.Text.IndexOf(currentSearch, 0, StringComparison.OrdinalIgnoreCase);
-        if (found < 0) return false;
-        SelectSearchResult(found);
-        return true;
+        if (string.IsNullOrWhiteSpace(currentSearch) || paragraphs.Count == 0) return false;
+        int current = Math.Max(0, GetCurrentParagraphIndex());
+        int firstOffset = GetOffsetWithinParagraph(current) + Math.Max(1, ReaderText.Selection.IsEmpty ? 0 : currentSearch.Length);
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+            int startParagraph = pass == 0 ? current : 0;
+            int endParagraph = pass == 0 ? paragraphs.Count : current + 1;
+            for (int i = startParagraph; i < endParagraph; i++)
+            {
+                int start = (pass == 0 && i == current) ? Math.Min(firstOffset, paragraphs[i].Text.Length) : 0;
+                int found = paragraphs[i].Text.IndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
+                if (found >= 0)
+                {
+                    SelectSearchResult(i, found);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private bool FindPrevious()
     {
-        if (string.IsNullOrWhiteSpace(currentSearch) || ReaderText.Text.Length == 0) return false;
-        int start = Math.Max(0, ReaderText.CaretIndex - 1);
-        int found = ReaderText.Text.LastIndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
-        if (found < 0 && ReaderText.Text.Length > 0)
-            found = ReaderText.Text.LastIndexOf(currentSearch, ReaderText.Text.Length - 1, StringComparison.OrdinalIgnoreCase);
-        if (found < 0) return false;
-        SelectSearchResult(found);
-        return true;
+        if (string.IsNullOrWhiteSpace(currentSearch) || paragraphs.Count == 0) return false;
+        int current = Math.Max(0, GetCurrentParagraphIndex());
+        int offset = Math.Max(0, GetOffsetWithinParagraph(current) - 1);
+
+        for (int i = current; i >= 0; i--)
+        {
+            int start = i == current ? Math.Min(offset, Math.Max(0, paragraphs[i].Text.Length - 1)) : Math.Max(0, paragraphs[i].Text.Length - 1);
+            int found = paragraphs[i].Text.LastIndexOf(currentSearch, start, StringComparison.OrdinalIgnoreCase);
+            if (found >= 0)
+            {
+                SelectSearchResult(i, found);
+                return true;
+            }
+        }
+        for (int i = paragraphs.Count - 1; i > current; i--)
+        {
+            if (paragraphs[i].Text.Length == 0) continue;
+            int found = paragraphs[i].Text.LastIndexOf(currentSearch, paragraphs[i].Text.Length - 1, StringComparison.OrdinalIgnoreCase);
+            if (found >= 0)
+            {
+                SelectSearchResult(i, found);
+                return true;
+            }
+        }
+        return false;
     }
 
-    private void SelectSearchResult(int offset)
+    private void SelectSearchResult(int paragraphIndex, int charOffset)
     {
+        var run = paragraphRuns[paragraphIndex];
+        var start = run.ContentStart.GetPositionAtOffset(charOffset, LogicalDirection.Forward) ?? run.ContentStart;
+        var end = start.GetPositionAtOffset(currentSearch.Length, LogicalDirection.Forward) ?? start;
         ReaderText.Focus();
-        ReaderText.Select(offset, currentSearch.Length);
-        ReaderText.ScrollToLine(ReaderText.GetLineIndexFromCharacterIndex(offset));
+        ReaderText.Selection.Select(start, end);
+        ReaderText.CaretPosition = end;
+        paragraphBlocks[paragraphIndex].BringIntoView();
     }
 
     private void AddBookmark()
@@ -334,8 +405,13 @@ public static class DocumentLoader
         using var pdf = PdfDocument.Open(path);
         foreach (var page in pdf.GetPages())
         {
-            string text = NormalizeWhitespace(page.Text);
-            if (text.Length > 0) result.Add(new ReaderLine(text, false, page.Number));
+            string extracted = ContentOrderTextExtractor.GetText(page);
+            string normalized = extracted.Replace("\r\n", "\n").Replace('\r', '\n');
+            foreach (string rawLine in normalized.Split('\n'))
+            {
+                string line = NormalizeWhitespace(rawLine);
+                if (line.Length > 0) result.Add(new ReaderLine(line, false, page.Number));
+            }
         }
         return new LoadedDocument(result);
     }
@@ -401,7 +477,8 @@ public static class DocumentLoader
     {
         string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
         var result = new List<ReaderLine>();
-        foreach (string block in normalized.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries))
+        var blocks = System.Text.RegularExpressions.Regex.Split(normalized, "\\n\\s*\\n+");
+        foreach (string block in blocks)
         {
             string paragraph = NormalizeWhitespace(block);
             if (paragraph.Length > 0) result.Add(new ReaderLine(paragraph));
