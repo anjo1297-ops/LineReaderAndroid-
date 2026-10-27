@@ -2,6 +2,7 @@ package org.example.linereader;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -32,7 +33,13 @@ public class LineReaderView extends View {
     private static final int ACTION_PREVIOUS_PARAGRAPH = 0x01020006;
     private static final int ACTION_NEXT_PAGE = 0x01020007;
     private static final int ACTION_PREVIOUS_PAGE = 0x01020008;
+    private static final int ACTION_READING_POSITION = 0x01020009;
+    private static final int ACTION_ADD_BOOKMARK = 0x0102000A;
     private static final int ACCESSIBILITY_BUFFER_LINES = 2;
+
+    public interface ReaderActionListener {
+        void onAddBookmark(int lineIndex, String lineText);
+    }
 
     private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<String> lines = new ArrayList<>();
@@ -49,15 +56,33 @@ public class LineReaderView extends View {
     private int firstVisibleLine = 0;
     private float lastTouchY;
     private float dragRemainder;
+    private ReaderActionListener actionListener;
 
     public LineReaderView(Context context, AttributeSet attrs) {
         super(context, attrs);
         textPaint.setTextSize(48f);
         textPaint.setTypeface(Typeface.DEFAULT);
+        textPaint.setColor(Color.BLACK);
+        setBackgroundColor(Color.WHITE);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         setFocusable(false);
         setFocusableInTouchMode(false);
         rebuildLines();
+    }
+
+    public void setReaderActionListener(ReaderActionListener listener) {
+        actionListener = listener;
+    }
+
+    public void setReaderTextSize(float px) {
+        textPaint.setTextSize(Math.max(32f, Math.min(px, 72f)));
+        rebuildLines();
+    }
+
+    public void setDarkReadingTheme(boolean dark) {
+        textPaint.setColor(dark ? Color.WHITE : Color.BLACK);
+        setBackgroundColor(dark ? Color.BLACK : Color.WHITE);
+        invalidate();
     }
 
     public void setDocumentText(String text) {
@@ -71,6 +96,10 @@ public class LineReaderView extends View {
     }
 
     public int getCurrentLineIndex() { return lineIndex; }
+    public int getLineCount() { return lines.size(); }
+    public String getCurrentLineText() {
+        return lines.isEmpty() ? "" : lines.get(Math.max(0, Math.min(lineIndex, lines.size() - 1)));
+    }
 
     public void setCurrentLineIndex(int index) {
         if (lines.isEmpty()) return;
@@ -81,6 +110,17 @@ public class LineReaderView extends View {
         if (pageStarts.isEmpty()) return "";
         int slot = currentPageSlot();
         return "Page " + pageNumbers.get(slot) + " of " + pageNumbers.get(pageNumbers.size() - 1);
+    }
+
+    public String getReadingPositionDescription() {
+        int percent;
+        if (lines.size() <= 1) percent = lineIndex > 0 ? 100 : 0;
+        else percent = Math.max(0, Math.min(100,
+                Math.round((lineIndex * 100f) / (lines.size() - 1))));
+        String value = percent + " percent through document";
+        String page = getCurrentPageDescription();
+        if (!page.isEmpty()) value += ". " + page;
+        return value;
     }
 
     public boolean findNext(String query) { return find(query, true); }
@@ -250,6 +290,12 @@ public class LineReaderView extends View {
                 if (pageNumber > 0) { pageStarts.add(lines.size()); pageNumbers.add(pageNumber); }
                 firstContent++;
             }
+            boolean structuredHeading = false;
+            if (firstContent < sourceLines.length
+                    && DocumentParser.HEADING_MARKER.equals(sourceLines[firstContent].trim())) {
+                structuredHeading = true;
+                firstContent++;
+            }
             if (firstContent >= sourceLines.length) continue;
             int paragraphStart = lines.size();
             paragraphStarts.add(paragraphStart); sentenceStarts.add(paragraphStart);
@@ -258,11 +304,12 @@ public class LineReaderView extends View {
                 if (headingCandidate.length() > 0) headingCandidate.append(' ');
                 headingCandidate.append(sourceLines[i].trim());
             }
-            if (looksLikeHeading(headingCandidate.toString())) headingStarts.add(paragraphStart);
+            if (structuredHeading || looksLikeHeading(headingCandidate.toString())) headingStarts.add(paragraphStart);
 
             for (int s = firstContent; s < sourceLines.length; s++) {
                 String source = sourceLines[s].trim();
-                if (source.isEmpty() || isPageMarker(source)) continue;
+                if (source.isEmpty() || isPageMarker(source)
+                        || DocumentParser.HEADING_MARKER.equals(source)) continue;
                 StaticLayout layout = StaticLayout.Builder.obtain(source, 0, source.length(), textPaint, width)
                         .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).build();
                 for (int i = 0; i < layout.getLineCount(); i++) {
@@ -407,6 +454,8 @@ public class LineReaderView extends View {
         info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.setHeading(headingStarts.contains(virtualId));
 
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(ACTION_READING_POSITION, "Reading position"));
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(ACTION_ADD_BOOKMARK, "Add bookmark"));
         if (virtualId < lines.size() - 1) {
             info.addAction(new AccessibilityNodeInfo.AccessibilityAction(ACTION_NEXT_PARAGRAPH, "Next paragraph"));
             info.addAction(new AccessibilityNodeInfo.AccessibilityAction(ACTION_NEXT_SENTENCE, "Next sentence"));
@@ -472,6 +521,12 @@ public class LineReaderView extends View {
             }
             if (action == AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY) return performMovementGranularity(arguments, true);
             if (action == AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY) return performMovementGranularity(arguments, false);
+            if (action == ACTION_READING_POSITION) { announceForAccessibility(getReadingPositionDescription()); return true; }
+            if (action == ACTION_ADD_BOOKMARK) {
+                focusVirtualLine(virtualViewId);
+                if (actionListener != null) actionListener.onAddBookmark(virtualViewId, lines.get(virtualViewId));
+                return true;
+            }
             if (action == ACTION_NEXT_PARAGRAPH) { nextParagraph(); return true; }
             if (action == ACTION_PREVIOUS_PARAGRAPH) { previousParagraph(); return true; }
             if (action == ACTION_NEXT_SENTENCE) { nextSentence(); return true; }
