@@ -6,7 +6,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -21,22 +20,29 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PREFS = "flexireader_state";
     private static final int MAX_RECENTS = 5;
+    private static final int MAX_BOOKMARKS = 20;
 
     private LineReaderView readerView;
     private LinearLayout homeContainer;
+    private LinearLayout readerControls;
     private LinearLayout recentContainer;
     private LinearLayout loadingContainer;
     private TextView loadingStatus;
     private ProgressBar loadingProgress;
     private Button openButton;
     private Button searchButton;
+    private Button settingsButton;
+    private Button addBookmarkButton;
+    private Button bookmarksButton;
     private SharedPreferences prefs;
 
     private int lastAnnouncedPercent = -20;
@@ -62,12 +68,19 @@ public class MainActivity extends AppCompatActivity {
 
         readerView = findViewById(R.id.readerView);
         homeContainer = findViewById(R.id.homeContainer);
+        readerControls = findViewById(R.id.readerControls);
         recentContainer = findViewById(R.id.recentContainer);
         loadingContainer = findViewById(R.id.loadingContainer);
         loadingStatus = findViewById(R.id.loadingStatus);
         loadingProgress = findViewById(R.id.loadingProgress);
         openButton = findViewById(R.id.openButton);
         searchButton = findViewById(R.id.searchButton);
+        settingsButton = findViewById(R.id.settingsButton);
+        addBookmarkButton = findViewById(R.id.addBookmarkButton);
+        bookmarksButton = findViewById(R.id.bookmarksButton);
+
+        applyReaderPreferences();
+        readerView.setReaderActionListener((lineIndex, lineText) -> addBookmark(lineIndex));
 
         openButton.setOnClickListener(v -> openDocument.launch(new String[]{
                 "application/pdf",
@@ -78,6 +91,9 @@ public class MainActivity extends AppCompatActivity {
                 "application/octet-stream"
         }));
         searchButton.setOnClickListener(v -> showSearchDialog());
+        settingsButton.setOnClickListener(v -> showSettingsDialog());
+        addBookmarkButton.setOnClickListener(v -> addBookmark(readerView.getCurrentLineIndex()));
+        bookmarksButton.setOnClickListener(v -> showBookmarksDialog());
 
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
@@ -103,8 +119,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             getContentResolver().takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (Exception ignored) {
-        }
+        } catch (Exception ignored) {}
     }
 
     private void loadDocument(Uri uri) {
@@ -121,6 +136,7 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     currentDocumentUri = uri;
                     currentDocumentName = name;
+                    applyReaderPreferences();
                     readerView.setDocumentText(text);
                     readerView.setCurrentLineIndex(savedPosition);
                     documentOpen = true;
@@ -145,9 +161,7 @@ public class MainActivity extends AppCompatActivity {
                     hideLoading();
                     showHome(false);
                     String detail = e.getMessage();
-                    if (detail == null || detail.trim().isEmpty()) {
-                        detail = e.getClass().getSimpleName();
-                    }
+                    if (detail == null || detail.trim().isEmpty()) detail = e.getClass().getSimpleName();
                     Toast.makeText(this,
                             "Could not read this document: " + detail,
                             Toast.LENGTH_LONG).show();
@@ -159,7 +173,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void setDocumentMode(boolean reading) {
         homeContainer.setVisibility(reading ? View.GONE : View.VISIBLE);
-        searchButton.setVisibility(reading ? View.VISIBLE : View.GONE);
+        readerControls.setVisibility(reading ? View.VISIBLE : View.GONE);
         readerView.setVisibility(View.VISIBLE);
     }
 
@@ -197,38 +211,127 @@ public class MainActivity extends AppCompatActivity {
 
     private int currentProgressPercent() {
         int position = readerView.getCurrentLineIndex();
-        int totalLines = getReaderLineCount();
+        int totalLines = readerView.getLineCount();
         if (totalLines <= 1) return position > 0 ? 100 : 0;
         return Math.max(0, Math.min(100,
                 Math.round((position * 100f) / (totalLines - 1))));
     }
 
-    private int getReaderLineCount() {
-        AccessibilityNodeInfo info = readerView.createAccessibilityNodeInfo();
-        try {
-            CharSequence description = info.getContentDescription();
-            if (description == null) return 0;
-            String value = description.toString();
-            String marker = "FlexiReader document. ";
-            int start = value.indexOf(marker);
-            int end = value.indexOf(" lines", start + marker.length());
-            if (start >= 0 && end > start) {
-                String number = value.substring(start + marker.length(), end).trim();
-                return Integer.parseInt(number);
-            }
-        } catch (Exception ignored) {
-        } finally {
-            info.recycle();
+    private String positionKey(Uri uri) { return "position|" + uri; }
+    private String progressKey(Uri uri) { return "progress|" + uri; }
+    private String bookmarksKey(Uri uri) { return "bookmarks|" + uri; }
+
+    private void addBookmark(int lineIndex) {
+        if (!documentOpen || currentDocumentUri == null) return;
+        int safeLine = Math.max(0, Math.min(lineIndex, readerView.getLineCount() - 1));
+        Set<Integer> bookmarks = getBookmarks(currentDocumentUri);
+        boolean added = bookmarks.add(safeLine);
+        while (bookmarks.size() > MAX_BOOKMARKS) {
+            Integer first = bookmarks.iterator().next();
+            bookmarks.remove(first);
         }
-        return 0;
+        saveBookmarks(currentDocumentUri, bookmarks);
+        int percent = percentForLine(safeLine);
+        String message = added
+                ? "Bookmark added at " + percent + " percent"
+                : "Bookmark already exists at " + percent + " percent";
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+        readerView.announceForAccessibility(message);
     }
 
-    private String positionKey(Uri uri) {
-        return "position|" + uri.toString();
+    private Set<Integer> getBookmarks(Uri uri) {
+        Set<Integer> result = new LinkedHashSet<>();
+        String saved = prefs.getString(bookmarksKey(uri), "");
+        if (saved == null || saved.trim().isEmpty()) return result;
+        for (String part : saved.split(",")) {
+            try { result.add(Integer.parseInt(part.trim())); } catch (Exception ignored) {}
+        }
+        return result;
     }
 
-    private String progressKey(Uri uri) {
-        return "progress|" + uri.toString();
+    private void saveBookmarks(Uri uri, Set<Integer> bookmarks) {
+        StringBuilder out = new StringBuilder();
+        for (Integer value : bookmarks) {
+            if (out.length() > 0) out.append(',');
+            out.append(value);
+        }
+        prefs.edit().putString(bookmarksKey(uri), out.toString()).apply();
+    }
+
+    private int percentForLine(int line) {
+        int total = readerView.getLineCount();
+        if (total <= 1) return 0;
+        return Math.max(0, Math.min(100, Math.round((line * 100f) / (total - 1))));
+    }
+
+    private void showBookmarksDialog() {
+        if (!documentOpen || currentDocumentUri == null) return;
+        List<Integer> positions = new ArrayList<>(getBookmarks(currentDocumentUri));
+        if (positions.isEmpty()) {
+            Toast.makeText(this, "No bookmarks in this document", Toast.LENGTH_SHORT).show();
+            readerView.announceForAccessibility("No bookmarks in this document");
+            return;
+        }
+        String[] labels = new String[positions.size()];
+        for (int i = 0; i < positions.size(); i++) {
+            int line = Math.max(0, Math.min(positions.get(i), readerView.getLineCount() - 1));
+            labels[i] = "Bookmark " + (i + 1) + ", " + percentForLine(line) + " percent";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.bookmarks)
+                .setItems(labels, (dialog, which) -> readerView.setCurrentLineIndex(positions.get(which)))
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    private void showSettingsDialog() {
+        String[] items = {getString(R.string.text_size), getString(R.string.reading_theme)};
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.settings)
+                .setItems(items, (dialog, which) -> {
+                    if (which == 0) showTextSizeDialog();
+                    else showReadingThemeDialog();
+                })
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    private void showTextSizeDialog() {
+        String current = prefs.getString("reader_text_size", "medium");
+        int checked = "small".equals(current) ? 0 : ("large".equals(current) ? 2 : 1);
+        String[] items = {getString(R.string.small), getString(R.string.medium), getString(R.string.large)};
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.text_size)
+                .setSingleChoiceItems(items, checked, (dialog, which) -> {
+                    String value = which == 0 ? "small" : (which == 2 ? "large" : "medium");
+                    prefs.edit().putString("reader_text_size", value).apply();
+                    applyReaderPreferences();
+                    dialog.dismiss();
+                })
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    private void showReadingThemeDialog() {
+        boolean dark = prefs.getBoolean("reader_dark_theme", false);
+        String[] items = {getString(R.string.light), getString(R.string.dark)};
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.reading_theme)
+                .setSingleChoiceItems(items, dark ? 1 : 0, (dialog, which) -> {
+                    prefs.edit().putBoolean("reader_dark_theme", which == 1).apply();
+                    applyReaderPreferences();
+                    dialog.dismiss();
+                })
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    private void applyReaderPreferences() {
+        if (readerView == null || prefs == null) return;
+        String size = prefs.getString("reader_text_size", "medium");
+        float px = "small".equals(size) ? 40f : ("large".equals(size) ? 58f : 48f);
+        readerView.setReaderTextSize(px);
+        readerView.setDarkReadingTheme(prefs.getBoolean("reader_dark_theme", false));
     }
 
     private void addRecent(Uri uri, String name) {
@@ -294,10 +397,8 @@ public class MainActivity extends AppCompatActivity {
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(R.string.search_document)
                 .setView(input)
-                .setPositiveButton(R.string.find_next, (d, which) ->
-                        runSearch(input.getText().toString(), true))
-                .setNeutralButton(R.string.find_previous, (d, which) ->
-                        runSearch(input.getText().toString(), false))
+                .setPositiveButton(R.string.find_next, (d, which) -> runSearch(input.getText().toString(), true))
+                .setNeutralButton(R.string.find_previous, (d, which) -> runSearch(input.getText().toString(), false))
                 .setNegativeButton(R.string.cancel, null)
                 .create();
         dialog.setOnShowListener(d -> input.requestFocus());
@@ -324,8 +425,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (total > 0) {
             loadingProgress.setIndeterminate(false);
-            int percent = Math.max(0, Math.min(100,
-                    Math.round((current * 100f) / total)));
+            int percent = Math.max(0, Math.min(100, Math.round((current * 100f) / total)));
             loadingProgress.setProgress(percent);
             if (forceAnnouncement || percent >= lastAnnouncedPercent + 20
                     || message.toLowerCase().startsWith("scanning")) {
@@ -344,14 +444,12 @@ public class MainActivity extends AppCompatActivity {
         lastAnnouncedPercent = -20;
     }
 
-    @Override
-    protected void onPause() {
+    @Override protected void onPause() {
         saveCurrentPosition();
         super.onPause();
     }
 
-    @Override
-    protected void onDestroy() {
+    @Override protected void onDestroy() {
         saveCurrentPosition();
         executor.shutdownNow();
         super.onDestroy();
