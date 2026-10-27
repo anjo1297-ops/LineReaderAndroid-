@@ -29,6 +29,27 @@ jobs:
       - name: Install Android API 36 and Build Tools
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
+      - name: Restore stable FlexiReader beta signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: flexireader-beta-debug-keystore-v1
+
+      - name: Ensure stable FlexiReader beta signing key exists
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=FlexiReader Beta,O=FlexiReader,C=IN"
+          fi
+
       - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
         with:
