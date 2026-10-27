@@ -8,4 +8,10 @@
     <string name="loading_document">Loading document…</string>
     <string name="processing_document">Processing document…</string>
     <string name="loading_complete">Document loaded</string>
+    <string name="recent_documents">Recent documents</string>
+    <string name="search_document">Search document</string>
+    <string name="search_hint">Enter text to find</string>
+    <string name="find_next">Find next</string>
+    <string name="find_previous">Find previous</string>
+    <string name="cancel">Cancel</string>
 </resources>
