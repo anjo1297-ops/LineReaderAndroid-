@@ -6,6 +6,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -103,7 +104,6 @@ public class MainActivity extends AppCompatActivity {
             getContentResolver().takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Exception ignored) {
-            // Some providers do not offer persistable grants. The current session still works.
         }
     }
 
@@ -124,13 +124,15 @@ public class MainActivity extends AppCompatActivity {
                     readerView.setDocumentText(text);
                     readerView.setCurrentLineIndex(savedPosition);
                     documentOpen = true;
+                    int progress = currentProgressPercent();
+                    prefs.edit().putInt(progressKey(uri), progress).apply();
                     addRecent(uri, name);
                     setDocumentMode(true);
                     hideLoading();
 
                     String page = readerView.getCurrentPageDescription();
                     String announcement = savedPosition > 0
-                            ? "Document loaded. Resumed reading position"
+                            ? "Document loaded. Resumed at " + progress + " percent"
                             : "Document loaded";
                     if (!page.isEmpty()) announcement += ". " + page;
                     readerView.announceForAccessibility(announcement);
@@ -185,11 +187,48 @@ public class MainActivity extends AppCompatActivity {
 
     private void saveCurrentPosition() {
         if (!documentOpen || currentDocumentUri == null) return;
-        prefs.edit().putInt(positionKey(currentDocumentUri), readerView.getCurrentLineIndex()).apply();
+        int position = readerView.getCurrentLineIndex();
+        int progress = currentProgressPercent();
+        prefs.edit()
+                .putInt(positionKey(currentDocumentUri), position)
+                .putInt(progressKey(currentDocumentUri), progress)
+                .apply();
+    }
+
+    private int currentProgressPercent() {
+        int position = readerView.getCurrentLineIndex();
+        int totalLines = getReaderLineCount();
+        if (totalLines <= 1) return position > 0 ? 100 : 0;
+        return Math.max(0, Math.min(100,
+                Math.round((position * 100f) / (totalLines - 1))));
+    }
+
+    private int getReaderLineCount() {
+        AccessibilityNodeInfo info = readerView.createAccessibilityNodeInfo();
+        try {
+            CharSequence description = info.getContentDescription();
+            if (description == null) return 0;
+            String value = description.toString();
+            String marker = "FlexiReader document. ";
+            int start = value.indexOf(marker);
+            int end = value.indexOf(" lines", start + marker.length());
+            if (start >= 0 && end > start) {
+                String number = value.substring(start + marker.length(), end).trim();
+                return Integer.parseInt(number);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            info.recycle();
+        }
+        return 0;
     }
 
     private String positionKey(Uri uri) {
         return "position|" + uri.toString();
+    }
+
+    private String progressKey(Uri uri) {
+        return "progress|" + uri.toString();
     }
 
     private void addRecent(Uri uri, String name) {
@@ -232,10 +271,11 @@ public class MainActivity extends AppCompatActivity {
             String name = prefs.getString("recent_name_" + i, "Document");
             Uri uri = Uri.parse(uriValue);
             int position = prefs.getInt(positionKey(uri), 0);
+            int progress = prefs.getInt(progressKey(uri), position > 0 ? 1 : 0);
 
             Button recent = new Button(this);
             String label = name;
-            if (position > 0) label += ", resume at line " + (position + 1);
+            if (position > 0) label += ", resume at " + progress + " percent";
             recent.setText(label);
             recent.setContentDescription(label);
             recent.setOnClickListener(v -> loadDocument(uri));
